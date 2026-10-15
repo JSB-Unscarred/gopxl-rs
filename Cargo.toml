@@ -1,0 +1,21 @@
+[package]
+name = "gopxl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT"
+description = "Unofficial Rust client for LMI GoPxL (Gocator) sensors, implementing the wire protocol directly."
+repository = "https://github.com/JSB-Unscarred/gopxl-rs"
+publish = false
+
+[lints.rust]
+# 线上协议全部用安全 Rust 实现，unsafe 只出现在依赖中。
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# 错误语义统一记录在 docs::architecture，逐函数复制 `# Errors` 只会制造模板文档。
+missing_errors_doc = "allow"
+must_use_candidate = "allow"

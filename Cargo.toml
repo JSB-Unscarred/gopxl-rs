@@ -8,6 +8,11 @@ description = "Unofficial Rust client for LMI GoPxL (Gocator) sensors, implement
 repository = "https://github.com/JSB-Unscarred/gopxl-rs"
 publish = false
 
+[dependencies]
+bytes = "1.11"
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+
 [lints.rust]
 # 线上协议全部用安全 Rust 实现，unsafe 只出现在依赖中。
 unsafe_code = "forbid"

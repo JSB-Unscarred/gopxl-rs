@@ -7,6 +7,9 @@
 //! 设计约定（分层、所有权、阻塞、unsafe、错误）见 [`docs::architecture`]。
 
 pub mod docs;
+pub mod value;
+
+pub use value::{Map, PointerError, Value};
 
 // 两份 README 中的 Rust 示例参与 doctest，避免与 API 脱节。
 #[cfg(doctest)]

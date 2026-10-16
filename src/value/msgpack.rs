@@ -130,7 +130,7 @@ fn write_negative(out: &mut Vec<u8>, v: i64) {
     }
 }
 
-fn write_str(out: &mut Vec<u8>, v: &str) -> Result<(), EncodeError> {
+pub(crate) fn write_str(out: &mut Vec<u8>, v: &str) -> Result<(), EncodeError> {
     write_len(out, &STR, v.len())?;
     out.extend_from_slice(v.as_bytes());
     Ok(())

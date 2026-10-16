@@ -38,6 +38,40 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `GoJson::Merge` | `Value::merge_patch(&mut self, &Value)` | RFC 7396 |
 | `GoJson::Contains`、`HasKey`、`Is*`、`Size`、`Empty`、`Begin`、`End`、`Find` | `pointer(..).is_some()`、`is_nil()`、`matches!`、`as_array()` / `as_map()` 的长度与迭代器 |  |
 | `GoJson::Add`、`Copy`、`Move`、`Patch`、`Flatten`、`Unflatten`、`GetHandle` | 不提供 | SDK 与示例都不调用；`Add`、`Copy`、`Move` 基于有损的 flatten，用 `set` / `remove` 组合即可；`GetHandle` 暴露 nlohmann 对象 |
+| `GoRequest::GoRequest(method, uri, content, args)` | `control::Request::new(Method, impl Into<String>) -> Request`，再设置 `payload`、`args` 字段 | `payload`、`args` 默认为 `{}`（线上 `0x80`）；路径原样发送 |
+| `GoRequest::Method`、`Uri`、`Content`、`Arguments` | `Request` 的 `method`、`path`、`payload`、`args` 字段 |  |
+| `GoRequest::ToByteArray` | `Request::encode(&self, &mut Vec<u8>) -> Result<(), EncodeError>` | 写出含 carrier 头的整帧，与 C++ SDK 逐字节一致；长度超过 `u32::MAX` 时报错，不写出任何字节 |
+| `GoRequest::Id` | 不提供 | 只是本地计数，线上没有请求 id |
+| `GoRequestMethod::ToString` | `Method::as_str` | 另有 `ListSub`、`ClearSub`、`ListStream`；.NET 的全小写拼写（`unsub`、`cancelstream`）被服务端拒绝，这里用精确拼写 |
+| `GoResponse::Type`、`GoResponseType::FromString`；`GoCtrlChannelV1` 的读帧 | `control::Inbound::decode(Bytes) -> Result<Inbound, InboundError>` | 未知 `type` 为 `Inbound::Other`（C++ 当作响应）；服务端从不产生的帧报错（C++ 丢弃后 FIFO 错位） |
+| `GoResponse::Status`、`Path`、`Payload`（`GoRequestResponse`） | `control::Response` 的 `status`、`path`、`payload` 字段 | 缺少 `status` 是坏帧（C++ 当作成功）；`path` 缺失为空串，`payload` 缺失为 `Nil` |
+| `GoNotificationResponse::NotificationType`；`GoNotificationType::FromString` | `control::Notification` 的 `event` 字段（`EventType`） | 未知字符串为 `EventType::Other`（C++ 当作 `Updated`） |
+| `GoStreamResponse::StreamIdentifier`、`StreamStatus` | `control::StreamMessage` 的 `stream_id`、`state`（`StreamState`）字段 |  |
+| `GoResponse::Raw` | 不提供 | 类型化的字段已包含全部内容 |
+| `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
+| `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
+| `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT` | 3600、3601 |
+| `GoGdpMsg::Deserialize`；`GoGdpClient` 的消息分派 | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | 每条消息都解析 CAS（C++ 跳过未知类型，丢掉 isLastMsg）；CAS 之后坏掉时为 `Body::Invalid` |
+| — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | 控制通道 `/dataSources` 流的 bin |
+| `GoGdpMsg::Type` | `gdp::Message` 的 `ty`、`body`（`Body`）字段 |  |
+| `GoGdpMsg::DataSourceId`、`StampSourceId`、`SpaceType`、`HasTransform`、`Transform`、`HasBoundingBox`、`BoundingBox`、`ArrayedCount`、`ArrayedIndex`、`DataSetId`、`IsLastMsg`、`GdpId` | `gdp::Cas` 的字段 | 变换与包围盒是 `Option`；`gdp_id` 在旧服务端的短 CAS 或 0xFFFF 时为 `None` |
+| `GoGdpNull::ErrorStatus` | `Body::Null(Status)` |  |
+| `GoGdpStamp` 的 getter | `gdp::Stamp` 的字段 | `Timestamp` 为 `timestamp` |
+| `GoGdpProfileBase`、`GoGdpProfileUniform`、`GoGdpProfilePointCloud` 的 getter | `gdp::ProfileAttrs`、`UniformProfile`、`ProfilePointCloud` 的字段 | `Resolution` / `Offset` 拆成 `x_scale`、`z_offset` 等；`Width`、`IntensityWidth` 即点数组与强度的长度；点是 `Vec`，强度是帧的切片 |
+| `GoGdpSurfaceBase`、`GoGdpSurfaceUniform`、`GoGdpSurfacePointCloud` 的 getter | `gdp::SurfaceAttrs`、`UniformSurface`、`SurfacePointCloud` 的字段；`SurfaceAttrs::intensity_row_size` |  |
+| `GoGdpImage` 的 getter | `gdp::Image` 的字段；`Image::row_size` | `ColumnBased` 为 `transposed`；1.3 的 scale / offset 是 `Option`，剩余字节不足时不读取 |
+| `GoGdpSpots` 的 getter | `gdp::Spots` 的字段 | `PointCount` 即 `spots.len()` |
+| `GoGdpMesh` 的 getter（`ChannelType(i)` 等按下标） | `gdp::Mesh` 的字段，`channels[i]`（`MeshChannel`） | 通道数据按 ID 解码为 `MeshData`，`AllocatedChannelDataCount` 即其长度；先确认字节够再分配 |
+| `GoGdpMeasurement`、`GoGdpString` 的 getter | `gdp::Measurement`、`GdpString` 的字段 | 标签位置是 `Option`；字符串保留内嵌 NUL |
+| `GoGdpRendering::GetGraphics`；`GoGraphics::*Count`、`*At` | `Body::Rendering(Rendering)` 中各图元的 `Vec` | 计数按 `u16` 读取（C++ 为 `k16s`）；未知区域类型为 `Region::Unknown` 并跳过；标签另读出 1.5 的对齐与颜色 |
+| `GoGdpFeaturePoint`、`GoGdpFeatureLine`、`GoGdpFeaturePlane`、`GoGdpFeatureCircle` 的 getter | `gdp::PointFeature`、`LineFeature`、`PlaneFeature`、`CircleFeature` 的字段 |  |
+| `GoGdpPixelFormat::PixelBits`、`IsNative`、`ToString` | `gdp::PixelFormat::bits`、`is_legacy`、`name` | `PixelBytes` 不提供（即 `bits() / 8`） |
+| `GoPxLDiscoveryProto::Broadcast` 发出的报文 | `discovery::encode_discover() -> [u8; 24]` |  |
+| `GoPxLDiscoveryProto::ParseReply`、`GoDiscoveryClient::ParseReply` | `discovery::parse_announce(&[u8]) -> Result<Instance, DiscoveryError>` | 只解析收到的字节；字段缺失或类型不对时取默认值（C++ 丢弃整条 Announce） |
+| `ClassicDiscoveryProto::BroadcastGetIP`、`SendGetInfo` 发出的报文 | `discovery::classic::encode_get_ip() -> [u8; 32]`、`encode_get_info(u32) -> [u8; 32]` |  |
+| `ClassicDiscoveryProto::ParseClassicGetIPReply`、`ParseClassicGetInfoReply` | `discovery::classic::handle_reply(&[u8], &mut Vec<Instance>) -> Result<Option<u32>, DiscoveryError>` | 返回需要发 `GetInfo` 的新序列号；按 `MsgId` 分派（C++ 按长度分派，丢掉 99 字节的 `GetInfo` 回复） |
+| `GoInstance::Get*`、`Set*` | `discovery::Instance` 的字段 | 地址是 `Option<Ipv4Addr>`；另有 `classic`、`truncated` |
+| — | `Instance::is_connectable`、`control_addr`、`gdp_addr` | SDK 示例 `Discover.cpp` 的连接判断 |
 
 ## 数据类型与协议
 
@@ -52,6 +86,27 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `GoJsonIterator` | `as_array()` / `as_map()` 返回的切片与 `BTreeMap` 的迭代器 |  |
 | `GoJsonError` | `PointerError`、`value::msgpack::DecodeError`、`value::msgpack::EncodeError`、`serde_json::Error` | 读取返回 `Option`，不报错 |
 | 控制通道消息体（carrier 类型 0xB000，MessagePack） | `value::msgpack` | 编码与 nlohmann 3.8.0 逐字节一致（最短整数、float64、键按字节序）；解码不依赖整数宽度与键序，ext 当作 `Bin` |
+| 长度前缀帧：carrier 帧、GDP 消息 | `frame::FrameReader`、`frame::FrameError`；`control::HEADER_LEN`（14）、`gdp::HEADER_LEN`（6） | 小端 `u32` 长度包含自身；先校验长度再精确分配；`WouldBlock` 不丢失已读字节 |
+| carrier 帧（`GoCtrlChannelV1`） | `Request::encode`、`Inbound::decode` | 客户端只收发 0xB000：服务端按请求的格式回复，C++ SDK 也只收 0xB000；`CarrierStatus` 必须为 1 |
+| `GoRequestMethod::Method` | `control::Method` |  |
+| `GoResponseType` | `control::Inbound`：`Response`、`Notification`、`Stream`、`Other` |  |
+| `GoNotificationType` | `control::EventType` | 含 `Other(String)` |
+| 流状态字符串（`streaming` / `complete` / `abort`） | `control::StreamState` | 含 `Other(String)` |
+| `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
+| `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
+| `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)` |
+| `CommonAttributes` | `gdp::Cas` |  |
+| `GoGdpTransform`、`GoGdpBoundingBox` | `Option<[f32; 12]>`、`Option<[f32; 6]>` | 线上顺序，保留 `f32` |
+| `kArray1<k16s>`、`kArray2<k16s>`、`kPoint16s`、`kPoint3d16s` 的数组 | `Vec<i16>`、`Vec<[i16; 2]>`、`Vec<[i16; 3]>` | 行主序；`k16S_NULL` 即 `i16::MIN` |
+| `kArray1<k8u>`、`kArray2<k8u>`（强度、图像像素） | `Bytes` | 帧的零拷贝切片 |
+| `GoGdpPixelFormat::FormatType` | `gdp::PixelFormat(i32)` 与全部常量 | BayerXX16 用 PFNC 值 0x0110002E 起（.NET 的值错误） |
+| `GdpSpot` | `gdp::Spot` |  |
+| `MeshMsgChannel`、`Channel_ID` | `gdp::MeshChannel`、`gdp::MeshData` |  |
+| `GoGraphics` 的 `GoPointSet`、`GoLineSet`、`GoRegion`、`GoPlane`、`GoRay`、`GoLabel`、`GoPosition` | `gdp::PointSet`、`LineSet`、`Region`、`Plane`、`Ray`、`Label`、`Position` |  |
+| 以 `k64F_NULL` 表示的缺失字段 | `Option` |  |
+| `GoInstance` | `discovery::Instance` |  |
+| 发现报文（`DiscoveryBroadcastHeader`、`DiscoveryServerHeader`、`ClassicDiscoveryGetIPCommand`、`ClassicDiscoveryGetIPReply`、`ClassicDiscoveryGetInfoReply`）与 Announce 的 JSON | `discovery` 的编解码函数与 `Instance` 字段 | 整数小端；经典回复中的 IPv4 地址按网络字节序 |
+| 发现报文的解析错误 | `discovery::DiscoveryError` | `Command` 表示收到的是客户端命令（含自己的回环） |
 
 ## 许可
 

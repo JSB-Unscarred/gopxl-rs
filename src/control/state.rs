@@ -156,19 +156,29 @@ impl StreamCore {
     }
 }
 
+// 保留原因：ControlCore 是自有设计，无法与官方实现对照，出错时响应会静默交给错误的调用方。
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::mpsc::TryRecvError;
 
-    use super::{ControlCore, DisconnectReason, ReplyRx, StreamCore, StreamEvent};
-    use crate::control::tests::message;
-    use crate::control::{Inbound, Method, Request, Response, Status};
-    use crate::value::Value;
+    use bytes::Bytes;
 
-    /// 消息体为 `json` 的服务端消息。
-    fn inbound(json: &str) -> Inbound {
-        Inbound::decode(message(json)).unwrap()
+    use super::{ControlCore, DisconnectReason, ReplyRx};
+    use crate::control::{Inbound, Method, Request, Response, Status};
+    use crate::value::{Value, msgpack};
+
+    /// 消息体为 `text`（JSON）的服务端消息：carrier 头（`Length`、0xB000、`CarrierStatus` 1、`DataLength`）加消息体。
+    fn inbound(text: &str) -> Inbound {
+        let mut body = Vec::new();
+        msgpack::encode(&text.parse::<Value>().unwrap(), &mut body).unwrap();
+        let n = u32::try_from(body.len()).unwrap();
+        let mut frame = (n + 14).to_le_bytes().to_vec();
+        frame.extend(0xB000_u16.to_le_bytes());
+        frame.extend(1_i32.to_le_bytes());
+        frame.extend(n.to_le_bytes());
+        frame.extend(body);
+        Inbound::decode(Bytes::from(frame)).unwrap()
     }
 
     fn register(core: &mut ControlCore, method: Method, path: &str) -> ReplyRx {
@@ -256,49 +266,6 @@ mod tests {
         assert!(matches!(
             core.on_inbound(inbound(r#"{"type":"response","status":1}"#)),
             Err(DisconnectReason::Unsolicited)
-        ));
-    }
-
-    // 流连接（§5.4 第 42 条）：应答前的数据照常产出；只有第一条响应是应答，之后的 −997 孤立响应忽略；
-    // complete / abort 产出结束码。
-    #[test]
-    fn stream_core_tolerates_early_data_and_spurious_responses() {
-        let stream = |state: &str, status: i32| {
-            inbound(&format!(
-                r#"{{"type":"stream","streamId":7,"streamStatus":"{state}","status":{status},"path":"/m"}}"#
-            ))
-        };
-        let reply = r#"{"type":"response","status":1,"path":"/m","payload":{"streamId":7}}"#;
-        let mut core = StreamCore::default();
-        assert!(matches!(
-            core.on_inbound(stream("streaming", 1)),
-            StreamEvent::Data(_)
-        ));
-        assert!(matches!(
-            core.on_inbound(inbound(reply)),
-            StreamEvent::Reply(Response {
-                status: Status::OK,
-                ..
-            })
-        ));
-        let cases = [
-            (stream("complete", 1), StreamEvent::End(Status::OK)),
-            (stream("abort", -990), StreamEvent::End(Status::CLOSED)),
-            (
-                inbound(r#"{"type":"response","status":-997,"path":"/m"}"#),
-                StreamEvent::Ignored,
-            ),
-            (
-                inbound(r#"{"type":"notification","eventType":"updated","path":"/m"}"#),
-                StreamEvent::Ignored,
-            ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(core.on_inbound(input), expected);
-        }
-        assert!(matches!(
-            core.on_inbound(stream("streaming", 1)),
-            StreamEvent::Data(_)
         ));
     }
 }

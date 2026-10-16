@@ -63,7 +63,7 @@
 //!   `Arc` 原因失败。`Decode` 是坏帧；`Unsolicited`（挂起队列为空时收到响应）与 `Desync`（响应的 `path` 与队首
 //!   请求不同）说明 FIFO 已经或可能错位，拆连接好过把响应交给错误的调用方。流连接上的坏帧直接是
 //!   `InboundError`；应答之后的孤立响应不是错误，忽略；
-//! - [`control::SubExprError`](crate::control::SubExprError)：订阅表达式含正则元字符，或生成的正则无法编译（例如
+//! - [`control::SubExprError`](crate::control::SubExprError)：订阅表达式含正则元字符或 NUL，或生成的正则无法编译（例如
 //!   `?`），本地无法与服务端一致地匹配，不发送；
 //! - schema：[`schema_for_path`](crate::schema::schema_for_path) 找不到路径时为 `None`，表示“不约束”；
 //!   [`validate`](crate::schema::validate) 返回 [`Issue`](crate::schema::Issue) 列表，空表即通过。校验只是建议性的，

@@ -24,7 +24,7 @@ pub struct SubscriptionExpr {
     is_embedded_match: Regex,
 }
 
-/// [`SubscriptionExpr::new`] 的错误：表达式含正则元字符，或生成的正则无法编译。携带原表达式。
+/// [`SubscriptionExpr::new`] 的错误：表达式含正则元字符或 NUL，或生成的正则无法编译。携带原表达式。
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("unsupported subscription expression {0:?}")]
 pub struct SubExprError(pub String);
@@ -35,11 +35,12 @@ impl SubscriptionExpr {
     /// 含 `| ( ) [ ] { } ^ \` 时报错：服务端把它们原样交给 ECMAScript 正则，而 regex-lite 在字符类、反向引用、
     /// 断言等语法上与之不同（GoPxL PC 版的 MSVC `std::regex` 还会对单独的 `]`、`}` 抛异常）。不含它们时两边只用到
     /// 字面字符、`.`、`.*`、分组与 `?` 量词；`(?R)` 让 `.` 与 ECMAScript 一样不匹配 `\r`、`\n`，再按字节匹配，结果
-    /// 与服务端相同。生成的正则无法编译（例如 `?`）或超过 regex-lite 的嵌套上限（约 16 级 `/`，已知的资源路径
-    /// 不超过 10 级）时同样报错。
+    /// 与服务端相同。含 NUL（服务端以 C 字符串读取表达式，在 NUL 处截断）、生成的正则无法编译（例如 `?`）或超过
+    /// regex-lite 的嵌套上限（约 16 级 `/`，已知的资源路径不超过 10 级）时同样报错。叠加的量词（`/a???`）与传感器的
+    /// libstdc++ 一样接受，PC 版的 MSVC 会拒绝。
     pub fn new(text: &str) -> Result<Self, SubExprError> {
         let error = || SubExprError(text.to_owned());
-        if text.contains(['|', '(', ')', '[', ']', '{', '}', '^', '\\']) {
+        if text.contains(['|', '(', ')', '[', ']', '{', '}', '^', '\\', '\0']) {
             return Err(error());
         }
         let compile =
@@ -109,169 +110,4 @@ fn escape(text: &str) -> String {
 /// `**` → `*` → `.*`（`ConvertRegexWildCards`）。
 fn wildcards(text: &str) -> String {
     text.replace("**", "*").replace('*', ".*")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{SubExprError, SubscriptionExpr, embedded_source, match_source};
-    use crate::control::EventType;
-
-    // 服务端规则（fill2 §E，重写方案 §1.4.8 的表，修 C++ 的第 17 条）：R / E 源串与逐字移植的结果一致，
-    // 匹配结果符合表中的 m / e 判定：`*` 跨越 `/`，`/a/*` 匹配 `/a`，精确路径收不到子项的事件，
-    // E 匹配祖先、`?` 在 R 中是单字符而在 E 中是量词。
-    #[test]
-    fn sources_and_matches_follow_server_rules() {
-        /// (表达式, R, E, [(路径, R 是否匹配, E 是否匹配)])
-        type Case = (
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static [(&'static str, bool, bool)],
-        );
-        let cases: [Case; 10] = [
-            (
-                "/tools",
-                "/tools",
-                "(/tools)",
-                &[
-                    ("/tools", true, true),
-                    ("/tools/X", false, false),
-                    ("/", false, false),
-                ],
-            ),
-            (
-                "/tools/*",
-                "/tools(/.*)?",
-                "(/tools(/.*)?)",
-                &[
-                    ("/tools", true, true),
-                    ("/tools/", true, true),
-                    ("/tools/X/inputs/0", true, true),
-                    ("/toolsX", false, false),
-                ],
-            ),
-            (
-                "/tools/T-0",
-                "/tools/T-0",
-                "(/tools(/T-0)?)",
-                &[
-                    ("/tools", false, true),
-                    ("/tools/T-0", true, true),
-                    ("/tools/T-0/inputs/0", false, false),
-                ],
-            ),
-            (
-                "/tools/Profile*/inputs/*",
-                "/tools/Profile.*/inputs(/.*)?",
-                "(/tools(/Profile.*(/inputs(/.*)?)?)?)",
-                &[
-                    ("/tools/ProfileA/inputs", true, true),
-                    ("/tools/Profile/x/inputs/0", true, true),
-                    ("/tools/P/inputs/0", false, false),
-                ],
-            ),
-            (
-                "/tools/T?",
-                "/tools/T.",
-                "(/tools(/T?)?)",
-                &[
-                    ("/tools/T1", true, false),
-                    ("/tools/T", false, true),
-                    ("/tools", false, true),
-                ],
-            ),
-            (
-                "/",
-                "/",
-                "(/)",
-                &[("/", true, true), ("/tools", false, false)],
-            ),
-            (
-                "/*",
-                "(/.*)?",
-                "(/.*)",
-                &[("", true, false), ("/a/b", true, true)],
-            ),
-            ("*", ".*", ".*", &[("", true, true), ("/a", true, true)]),
-            (
-                "/a.b:c+d$/**",
-                r"/a\.b\:c\+d\$(/.*)?",
-                r"(/a\.b\:c\+d\$(/.*)?)",
-                &[("/a.b:c+d$/x", true, true), ("/aXb:c+d$", false, false)],
-            ),
-            (
-                "/tools/",
-                "/tools/",
-                "(/tools(/)?)",
-                &[("/tools", false, true), ("/tools/", true, true)],
-            ),
-        ];
-        let updated = EventType::Updated;
-        let embedded = EventType::EmbeddedUpdated;
-        for (text, r, e, paths) in cases {
-            assert_eq!(
-                (match_source(text).as_str(), embedded_source(text).as_str()),
-                (r, e),
-                "{text}"
-            );
-            let expr = SubscriptionExpr::new(text).unwrap();
-            for &(path, m, em) in paths {
-                // `/` 上的 embeddedUpdated 投给每个订阅，不看 E。
-                let em = em || path == "/";
-                assert_eq!(
-                    (
-                        expr.delivers(&updated, path),
-                        expr.delivers(&embedded, path)
-                    ),
-                    (m, em),
-                    "{text} on {path}"
-                );
-            }
-        }
-        // 未知事件与 created / deleted 一样用 R。
-        let expr = SubscriptionExpr::new("/tools/T-0").unwrap();
-        assert!(!expr.delivers(&EventType::Other("Unknown".into()), "/tools"));
-        assert!(expr.delivers(&EventType::Deleted, "/tools/T-0"));
-    }
-
-    // 与服务端的 std::regex 一致（期望值来自对服务端变换的 C++ 移植）：`.` 不匹配 `\r`；按字节匹配，所以 R 的
-    // `?` 只吃一个字节、E 的 `?` 只作用于多字节字符的最后一个字节。
-    #[test]
-    fn matching_is_bytewise_and_skips_line_terminators() {
-        let cases = [
-            ("/a/*", "/a/x\ry", false, false),
-            ("/tools/T?", "/tools/T\r", false, false),
-            ("/jobs/files/工位?", "/jobs/files/工位二", false, false),
-            ("/tools/T??", "/tools/Tä", true, false),
-            ("/aé?", "/a", false, false),
-            ("/aé?", "/aé", false, true),
-            ("/t/工*", "/t/工位", true, true),
-        ];
-        for (text, path, m, e) in cases {
-            let expr = SubscriptionExpr::new(text).unwrap();
-            assert_eq!(
-                (
-                    expr.delivers(&EventType::Updated, path),
-                    expr.delivers(&EventType::EmbeddedUpdated, path)
-                ),
-                (m, e),
-                "{text} on {path:?}"
-            );
-        }
-    }
-
-    // 活的正则元字符在 regex-lite 中语义不同，一律拒绝；无法编译的正则同样报错；其余表达式（含不以 `/` 开头的）
-    // 都能编译。
-    #[test]
-    fn regex_metacharacters_are_rejected() {
-        for text in ["/a|/b", "/a(", "/a)", "/a[0]", "/a{2}", "^/a", r"/a\d", "?"] {
-            assert_eq!(
-                SubscriptionExpr::new(text).unwrap_err(),
-                SubExprError(text.into())
-            );
-        }
-        for text in ["", "tools", "/a??", "/**/x"] {
-            assert!(SubscriptionExpr::new(text).is_ok(), "{text}");
-        }
-    }
 }

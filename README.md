@@ -27,7 +27,7 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | SDK 接口 | Rust 接口 | 说明 |
 | --- | --- | --- |
 | `GoJson::GoJson()` | `Value::object() -> Value` | `Value::default()` 是 `Nil` |
-| `GoJson::GoJson(const std::string&)`、`GoJson::ParseString` | `str::parse::<Value>()`（`FromStr`，`Err = serde_json::Error`） | 解析 JSON 文本 |
+| `GoJson::GoJson(const std::string&)`、`GoJson::ParseString` | `str::parse::<Value>()`（`FromStr`，`Err = serde_json::Error`） | 解析 JSON 文本；浮点数正确舍入，与 GoJson 逐位相同；整数文本 `-0` 为 `Float(-0.0)`（GoJson 为整数 0） |
 | `GoJson::ToString` | `impl Display for Value` | 紧凑 JSON，`{:#}` 为缩进格式；`Bin` 输出为 `"<bin N bytes>"` |
 | `GoJson::ToBinary` | `value::msgpack::encode(&Value, &mut Vec<u8>) -> Result<(), EncodeError>` | 与 nlohmann 3.8.0 逐字节一致；长度超过 `u32::MAX` 时报错 |
 | `GoJson::ParseMsgPack` | `value::msgpack::decode(&Bytes) -> Result<Value, DecodeError>` | `Bin` 是输入的零拷贝切片；嵌套上限 128 层 |
@@ -52,9 +52,9 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
 | `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致或挂起队列为空时报错，由连接层拆连接（C++ 错位后继续） |
 | `GoRestClient` 的流消息分派（`SetStreamHandler`） | `control::StreamCore::on_inbound(Inbound) -> StreamEvent` | 每个流一条连接；应答前的数据照常产出，应答之后的孤立响应忽略（C++ 当作下一个请求的应答） |
-| `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \`，生成的正则无法编译时同样报错 |
+| `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \` 与 NUL（服务端在 NUL 处截断表达式），生成的正则无法编译时同样报错 |
 | `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | 路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`）；路径与 `Value::pointer` 同一语法（`/` 是键 `""`，C++ 把它当作根）；`type` 为可空数组时同样导航 |
-| `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计 |
+| `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计；`type: "null"` 只接受 `Nil`（C++ 不认识它，一律通过） |
 | `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT` | 3600、3601 |
 | `GoGdpMsg::Deserialize`；`GoGdpClient` 的消息分派 | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | 每条消息都解析 CAS（C++ 跳过未知类型，丢掉 isLastMsg）；CAS 之后坏掉时为 `Body::Invalid` |
 | — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | 控制通道 `/dataSources` 流的 bin |

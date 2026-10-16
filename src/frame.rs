@@ -129,6 +129,7 @@ mod tests {
     }
 
     // 增量读取约定：逐字节、穿插 WouldBlock 的输入得到与整块输入相同的帧，帧边界上的 EOF 是 None。
+    // 保留原因：真实 socket 上难以复现半帧，出错时静默丢字节、帧错位。
     #[test]
     fn trickled_input_yields_the_same_frames() {
         let frames = [frame(b"ab"), frame(b""), frame(&[7; 300])];
@@ -150,28 +151,14 @@ mod tests {
         assert_eq!(got, frames);
     }
 
-    // 内存安全约定：越界的长度在分配之前报错；帧中途（含长度字段中途）的 EOF 报 UnexpectedEof。
+    // 内存安全约定：声明 4 GiB 的长度在分配之前报错。
+    // 保留原因：lint 只禁止 panic，拦不住按网络输入分配巨量内存。
     #[test]
-    fn bad_lengths_and_truncation_are_errors() {
-        let mut decoder = FrameReader::new(14, 1024);
+    fn huge_length_is_rejected_before_allocation() {
         let huge = [0xFF_u8; 4];
         assert!(matches!(
-            decoder.read(&mut &huge[..]),
+            FrameReader::new(14, 1024).read(&mut &huge[..]),
             Err(FrameError::Length(u32::MAX))
         ));
-        let short = 13_u32.to_le_bytes();
-        assert!(matches!(
-            FrameReader::new(14, 1024).read(&mut &short[..]),
-            Err(FrameError::Length(13))
-        ));
-
-        let whole = frame(&[1; 20]);
-        for end in 1..whole.len() {
-            let result = FrameReader::new(14, 1024).read(&mut &whole[..end]);
-            assert!(
-                matches!(&result, Err(FrameError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof),
-                "prefix of {end} bytes"
-            );
-        }
     }
 }

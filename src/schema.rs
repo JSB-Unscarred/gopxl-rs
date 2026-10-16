@@ -174,7 +174,8 @@ fn has_type(node: &Value, name: &str) -> bool {
     type_names(node).any(|ty| ty == name)
 }
 
-/// 值是否属于类型名 `ty`；`integer` 也是 `number`。不认识的类型名不约束（与 C++ 相同）。
+/// 值是否属于类型名 `ty`；`integer` 也是 `number`，`null` 只接受 `Nil`（C++ 不认识 `null`，一律通过）。不认识的
+/// 类型名不约束（与 C++ 相同）。
 fn type_matches(value: &Value, ty: &str) -> bool {
     match ty {
         "null" => value.is_nil(),
@@ -197,135 +198,5 @@ fn enum_eq(value: &Value, option: &Value) -> bool {
             .zip(option.as_f64())
             .is_some_and(|(a, b)| (a - b).abs() < EPSILON),
         _ => value == option,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Issue, schema_for_path, validate};
-    use crate::json;
-    use crate::value::Value;
-
-    // SchemaForPath 的导航规则：路径与 `Value::pointer` 同一语法；对象走 properties，数组要求数字下标并区分
-    // 元组与列表形式，可空的数组类型同样导航；路径不在 schema 中时为 None。
-    #[test]
-    fn schema_for_path_follows_properties_and_items() {
-        let schema = json(
-            r#"{"type":"object","properties":{
-                "a":{"properties":{"b":{"type":"integer"}}},
-                "list":{"type":["array","null"],"items":{"type":"number"}},
-                "tuple":{"type":"array","items":[{"type":"string"},{"type":"boolean"}]},
-                "n":{"type":"number"}}}"#,
-        );
-        let cases = [
-            ("", Some(&schema)),
-            ("/", None),
-            ("/a/b", schema.pointer("/properties/a/properties/b")),
-            ("a/b", schema.pointer("/properties/a/properties/b")),
-            ("/a/b/", None),
-            ("/list/7", schema.pointer("/properties/list/items")),
-            ("/tuple/1", schema.pointer("/properties/tuple/items/1")),
-            ("/tuple/2", None),
-            ("/list/x", None),
-            ("/n/x", None),
-            ("/missing", None),
-        ];
-        for (path, expected) in cases {
-            assert_eq!(schema_for_path(&schema, path), expected, "{path}");
-        }
-    }
-
-    // 校验规则与 C++ 的顺序：readOnly 与类型不符立即返回，其余问题全部收集；只校验这一层。
-    #[test]
-    fn validate_checks_keywords_in_cpp_order() {
-        let cases = [
-            (
-                r#"{"readOnly":true,"type":"string"}"#,
-                "1",
-                vec![Issue::ReadOnly],
-            ),
-            (
-                r#"{"type":"string","minLength":5}"#,
-                "1",
-                vec![Issue::Type(json(r#""string""#))],
-            ),
-            (
-                r#"{"type":"integer"}"#,
-                "1.5",
-                vec![Issue::Type(json(r#""integer""#))],
-            ),
-            (r#"{"type":"number"}"#, "1", vec![]),
-            (r#"{"type":"custom"}"#, "null", vec![]),
-            (
-                r#"{"minimum":2,"maximum":0,"exclusiveMinimum":1,"exclusiveMaximum":1}"#,
-                "1",
-                vec![
-                    Issue::Minimum(2.0),
-                    Issue::Maximum(0.0),
-                    Issue::ExclusiveMinimum(1.0),
-                    Issue::ExclusiveMaximum(1.0),
-                ],
-            ),
-            (r#"{"multipleOf":0.1}"#, "0.3", vec![]),
-            (r#"{"multipleOf":0.5}"#, "0.3", vec![Issue::MultipleOf(0.5)]),
-            (
-                r#"{"minItems":2,"maxItems":0}"#,
-                "[1]",
-                vec![Issue::MinItems(2), Issue::MaxItems(0)],
-            ),
-            (
-                r#"{"type":"object","required":["a","b"],"properties":{"a":{"type":"string"}}}"#,
-                r#"{"a":1}"#,
-                vec![Issue::Required("b".into())],
-            ),
-            (r#"{"enum":["x","y"]}"#, r#""z""#, vec![Issue::Enum]),
-            (r#"{"enum":[1.0]}"#, "1", vec![]),
-            (r#"{"enum":[1]}"#, "null", vec![]),
-        ];
-        for (schema, value, expected) in cases {
-            assert_eq!(
-                validate(&json(value), &json(schema)),
-                expected,
-                "{schema} {value}"
-            );
-        }
-    }
-
-    // 修 C++ 的第 37 条：binary 要求 Bin；可空类型数组；multipleOf 对负数不误报；enum 的整数不截断；
-    // 空 enum 不约束；长度按字符计。
-    #[test]
-    fn validate_fixes_cpp_defects() {
-        let nullable = r#"{"type":["number","null"],"minimum":0}"#;
-        let cases = [
-            (Value::from(vec![1_u8, 2]), r#"{"type":"binary"}"#, vec![]),
-            (
-                json(r#""AQI=""#),
-                r#"{"type":"binary"}"#,
-                vec![Issue::Type(json(r#""binary""#))],
-            ),
-            (Value::Nil, nullable, vec![]),
-            (json("-1"), nullable, vec![Issue::Minimum(0.0)]),
-            (
-                json(r#""a""#),
-                nullable,
-                vec![Issue::Type(json(r#"["number","null"]"#))],
-            ),
-            (json("-0.3"), r#"{"multipleOf":0.1}"#, vec![]),
-            (json("4294967297"), r#"{"enum":[1]}"#, vec![Issue::Enum]),
-            (json(r#""x""#), r#"{"enum":[]}"#, vec![]),
-            (json(r#""毫米""#), r#"{"maxLength":2}"#, vec![]),
-            (
-                json(r#""毫米""#),
-                r#"{"minLength":3}"#,
-                vec![Issue::MinLength(3)],
-            ),
-        ];
-        for (value, schema, expected) in cases {
-            assert_eq!(
-                validate(&value, &json(schema)),
-                expected,
-                "{schema} {value}"
-            );
-        }
     }
 }

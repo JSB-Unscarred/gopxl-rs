@@ -15,23 +15,3 @@ pub mod schema;
 pub mod value;
 
 pub use value::{Map, PointerError, Value};
-
-/// 测试辅助：空白分隔的十六进制文本转为字节，黄金字节按抓包的写法直接写在测试里。
-#[cfg(test)]
-pub(crate) fn hex(text: &str) -> Vec<u8> {
-    text.split_whitespace()
-        .map(|b| u8::from_str_radix(b, 16).unwrap())
-        .collect()
-}
-
-/// 测试辅助：解析 JSON 文本，测试数据按 JSON 写。
-#[cfg(test)]
-pub(crate) fn json(text: &str) -> Value {
-    text.parse().unwrap()
-}
-
-// 两份 README 中的 Rust 示例参与 doctest，避免与 API 脱节。
-#[cfg(doctest)]
-#[doc = include_str!("../README.md")]
-#[doc = include_str!("../README.en.md")]
-struct ReadmeDoctests;

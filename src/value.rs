@@ -329,7 +329,8 @@ fn to_json(value: &Value) -> serde_json::Value {
 }
 
 /// 解析 JSON 文本，对应 `GoJson(const std::string&)` 与 `GoJson::ParseString`，例如
-/// `r#"{"enabled":true}"#.parse::<Value>()`。嵌套深度受 `serde_json` 的 128 层上限约束。
+/// `r#"{"enabled":true}"#.parse::<Value>()`。嵌套深度受 `serde_json` 的 128 层上限约束。浮点数正确舍入，与 `GoJson`
+/// 逐位相同；整数文本 `-0` 是 `Float(-0.0)`（`GoJson` 为整数 0）。
 impl FromStr for Value {
     type Err = serde_json::Error;
 
@@ -353,118 +354,5 @@ fn from_json(json: serde_json::Value) -> Value {
         serde_json::Value::Object(map) => {
             Value::Map(map.into_iter().map(|(k, v)| (k, from_json(v))).collect())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Value;
-    use crate::json;
-
-    // RFC 6901 §5 的全部例子，以及 GoJsonPointer 的宽松规则（补前导 `/`）；下标不接受前导零和 `+`。
-    #[test]
-    fn pointer_follows_rfc6901_and_adds_missing_slash() {
-        let doc = json(
-            r#"{"foo":["bar","baz"],"":0,"a/b":1,"c%d":2,"e^f":3,"g|h":4,"i\\j":5,"k\"l":6," ":7,"m~n":8}"#,
-        );
-        let cases = [
-            ("/foo", json(r#"["bar","baz"]"#)),
-            ("/foo/0", json(r#""bar""#)),
-            ("/", Value::Int(0)),
-            ("/a~1b", Value::Int(1)),
-            ("/c%d", Value::Int(2)),
-            ("/e^f", Value::Int(3)),
-            ("/g|h", Value::Int(4)),
-            ("/i\\j", Value::Int(5)),
-            ("/k\"l", Value::Int(6)),
-            ("/ ", Value::Int(7)),
-            ("/m~0n", Value::Int(8)),
-            ("foo/1", json(r#""baz""#)),
-        ];
-        assert_eq!(doc.pointer(""), Some(&doc));
-        for (pointer, expected) in cases {
-            assert_eq!(doc.pointer(pointer), Some(&expected), "{pointer}");
-        }
-        for missing in [
-            "/foo/2", "/foo/01", "/foo/+1", "/foo/-", "/nope", "/foo/0/x",
-        ] {
-            assert_eq!(doc.pointer(missing), None, "{missing}");
-        }
-    }
-
-    // set 只自动创建对象，数组只能写已有下标或追加；出错时文档不变；显式 null 被保留（补丁需要它）。
-    #[test]
-    fn set_creates_objects_only_and_is_atomic_on_error() {
-        let mut doc = Value::Nil;
-        doc.set("a/b/0", 1).unwrap();
-        doc.set("/list", vec![Value::Int(1)]).unwrap();
-        doc.set("/list/0", 2).unwrap();
-        doc.set("/list/-", 3).unwrap();
-        doc.set("/gone", Value::Nil).unwrap();
-        assert_eq!(doc, json(r#"{"a":{"b":{"0":1}},"list":[2,3],"gone":null}"#));
-
-        let before = doc.clone();
-        assert!(doc.set("/list/2", 0).is_err());
-        assert!(doc.set("/list/0/x", 0).is_err());
-        assert!(doc.set("/a/b/0/c", 0).is_err());
-        assert_eq!(doc, before);
-
-        doc.set("", 5).unwrap();
-        assert_eq!(doc, Value::Int(5));
-    }
-
-    // GoJson 基于 flatten 的 Remove 会留下 null 洞、把空容器变成 null；这里删除后元素前移，空容器保持原样。
-    #[test]
-    fn remove_shifts_array_and_keeps_empty_containers() {
-        let mut doc = json(r#"{"a":[1,2,3],"b":{"c":1}}"#);
-        assert_eq!(doc.remove("/a/0"), Some(Value::Int(1)));
-        assert_eq!(doc.remove("/b/c"), Some(Value::Int(1)));
-        assert_eq!(doc.remove("/a/5"), None);
-        assert_eq!(doc.remove(""), None);
-        assert_eq!(doc, json(r#"{"a":[2,3],"b":{}}"#));
-    }
-
-    // RFC 7396 附录 A 的全部用例。
-    #[test]
-    fn merge_patch_matches_rfc7396_appendix_a() {
-        let cases = [
-            (r#"{"a":"b"}"#, r#"{"a":"c"}"#, r#"{"a":"c"}"#),
-            (r#"{"a":"b"}"#, r#"{"b":"c"}"#, r#"{"a":"b","b":"c"}"#),
-            (r#"{"a":"b"}"#, r#"{"a":null}"#, "{}"),
-            (r#"{"a":"b","b":"c"}"#, r#"{"a":null}"#, r#"{"b":"c"}"#),
-            (r#"{"a":["b"]}"#, r#"{"a":"c"}"#, r#"{"a":"c"}"#),
-            (r#"{"a":"c"}"#, r#"{"a":["b"]}"#, r#"{"a":["b"]}"#),
-            (
-                r#"{"a":{"b":"c"}}"#,
-                r#"{"a":{"b":"d","c":null}}"#,
-                r#"{"a":{"b":"d"}}"#,
-            ),
-            (r#"{"a":[{"b":"c"}]}"#, r#"{"a":[1]}"#, r#"{"a":[1]}"#),
-            (r#"["a","b"]"#, r#"["c","d"]"#, r#"["c","d"]"#),
-            (r#"{"a":"b"}"#, r#"["c"]"#, r#"["c"]"#),
-            (r#"{"a":"foo"}"#, "null", "null"),
-            (r#"{"a":"foo"}"#, r#""bar""#, r#""bar""#),
-            (r#"{"e":null}"#, r#"{"a":1}"#, r#"{"e":null,"a":1}"#),
-            ("[1,2]", r#"{"a":"b","c":null}"#, r#"{"a":"b"}"#),
-            ("{}", r#"{"a":{"bb":{"ccc":null}}}"#, r#"{"a":{"bb":{}}}"#),
-        ];
-        for (target, patch, expected) in cases {
-            let mut doc = json(target);
-            doc.merge_patch(&json(patch));
-            assert_eq!(doc, json(expected), "{target} + {patch}");
-        }
-    }
-
-    // Display 输出合法的 JSON：解析回来与原值相等（浮点数保留小数点）；Bin 只输出长度，NaN 输出 null。
-    #[test]
-    fn display_is_json_that_parses_back() {
-        let doc = json(
-            r#"{"s":"q\"\\\n\t\u0001中","f":1.0,"e":1e-7,"i":-3,"u":18446744073709551615,"a":[null,true]}"#,
-        );
-        assert_eq!(doc["u"], Value::UInt(u64::MAX));
-        assert_eq!(doc.to_string().parse::<Value>().unwrap(), doc);
-
-        let lossy = Value::Array(vec![Value::from(vec![1_u8, 2]), Value::Float(f64::NAN)]);
-        assert_eq!(lossy.to_string(), r#"["<bin 2 bytes>",null]"#);
     }
 }

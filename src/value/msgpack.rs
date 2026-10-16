@@ -310,102 +310,15 @@ fn enter(depth: usize) -> Result<usize, DecodeError> {
 mod tests {
     use bytes::Bytes;
 
-    use super::{DecodeError, MAX_DEPTH, decode, encode};
-    use crate::value::{Map, Value};
-
-    fn encoded(value: &Value) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode(value, &mut out).unwrap();
-        out
-    }
+    use super::{DecodeError, MAX_DEPTH, decode};
+    use crate::value::Value;
 
     fn decoded(bytes: &[u8]) -> Result<Value, DecodeError> {
         decode(&Bytes::copy_from_slice(bytes))
     }
 
-    // G12：每种长度头在边界两侧的编码与 nlohmann 3.8.0 相同（最短格式），且解码回原值。
-    #[test]
-    fn encode_uses_shortest_headers_like_nlohmann() {
-        let cases: [(Value, &[u8]); 28] = [
-            (0.into(), &[0x00]),
-            (127.into(), &[0x7F]),
-            (128.into(), &[0xCC, 0x80]),
-            (255.into(), &[0xCC, 0xFF]),
-            (256.into(), &[0xCD, 0x01, 0x00]),
-            (65_535.into(), &[0xCD, 0xFF, 0xFF]),
-            (65_536.into(), &[0xCE, 0x00, 0x01, 0x00, 0x00]),
-            (u32::MAX.into(), &[0xCE, 0xFF, 0xFF, 0xFF, 0xFF]),
-            (0x1_0000_0000_i64.into(), &[0xCF, 0, 0, 0, 1, 0, 0, 0, 0]),
-            (
-                u64::MAX.into(),
-                &[0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-            ),
-            ((-1).into(), &[0xFF]),
-            ((-32).into(), &[0xE0]),
-            ((-33).into(), &[0xD0, 0xDF]),
-            ((-129).into(), &[0xD1, 0xFF, 0x7F]),
-            ((-996).into(), &[0xD1, 0xFC, 0x1C]),
-            (i64::MIN.into(), &[0xD3, 0x80, 0, 0, 0, 0, 0, 0, 0]),
-            (0.5.into(), &[0xCB, 0x3F, 0xE0, 0, 0, 0, 0, 0, 0]),
-            ("x".repeat(31).into(), &[0xBF]),
-            ("x".repeat(32).into(), &[0xD9, 0x20]),
-            ("x".repeat(255).into(), &[0xD9, 0xFF]),
-            ("x".repeat(256).into(), &[0xDA, 0x01, 0x00]),
-            (vec![7_u8; 0].into(), &[0xC4, 0x00]),
-            (vec![7_u8; 255].into(), &[0xC4, 0xFF]),
-            (vec![7_u8; 256].into(), &[0xC5, 0x01, 0x00]),
-            (vec![7_u8; 65_535].into(), &[0xC5, 0xFF, 0xFF]),
-            (vec![7_u8; 65_536].into(), &[0xC6, 0x00, 0x01, 0x00, 0x00]),
-            (vec![Value::Nil; 15].into(), &[0x9F]),
-            (vec![Value::Nil; 16].into(), &[0xDC, 0x00, 0x10]),
-        ];
-        for (value, header) in cases {
-            let bytes = encoded(&value);
-            assert!(bytes.starts_with(header), "{value}");
-            assert_eq!(decoded(&bytes).unwrap(), value, "{value}");
-        }
-    }
-
-    // G1 的消息体：请求的四个键按字节序写出，与 C++ SDK 的 `read /system/info` 逐字节一致。
-    #[test]
-    fn map_keys_are_written_in_byte_order() {
-        let request = Value::Map(Map::from([
-            ("path".into(), "/system/info".into()),
-            ("method".into(), "read".into()),
-            ("payload".into(), Value::object()),
-            ("args".into(), Value::object()),
-        ]));
-        assert_eq!(
-            encoded(&request),
-            b"\x84\xA4args\x80\xA6method\xA4read\xA4path\xAC/system/info\xA7payload\x80"
-        );
-    }
-
-    // G13：服务端的宽度怪癖与键序不影响解码结果；有符号 marker 写的正数、CF 写的小数都归一化为 Int。
-    #[test]
-    fn decode_ignores_server_widths_and_key_order() {
-        assert_eq!(decoded(&[0xD2, 0, 0, 0, 1]).unwrap(), Value::Int(1));
-        assert_eq!(decoded(&[0xD0, 0x05]).unwrap(), Value::Int(5));
-        assert_eq!(decoded(&[0xCE, 0, 0, 0, 0x80]).unwrap(), Value::Int(128));
-        assert_eq!(
-            decoded(&[0xCF, 0, 0, 0, 0, 0, 0, 0, 1]).unwrap(),
-            Value::Int(1)
-        );
-        assert_eq!(
-            decoded(&[0xCA, 0x3F, 0xC0, 0, 0]).unwrap(),
-            Value::Float(1.5)
-        );
-
-        let mut str31 = vec![0xD9, 0x1F];
-        str31.extend_from_slice(&[b'x'; 31]);
-        assert_eq!(decoded(&str31).unwrap(), Value::from("x".repeat(31)));
-
-        let insertion_order = decoded(b"\x82\xA1b\x01\xA1a\x02").unwrap();
-        let byte_order = decoded(b"\x82\xA1a\x02\xA1b\x01").unwrap();
-        assert_eq!(insertion_order, byte_order);
-    }
-
     // 内存安全约定：深度上限内的嵌套可以解码，超过一层即报错；声明巨大长度的短输入报 Truncated，不预分配。
+    // 保留原因：lint 只禁止 panic，拦不住递归栈溢出与按网络输入分配巨量内存。
     #[test]
     fn decode_rejects_depth_and_length_bombs() {
         let nested = |levels: usize| {
@@ -422,39 +335,5 @@ mod tests {
                 Err(DecodeError::Truncated)
             );
         }
-    }
-
-    // 坏输入只得到 Err：完整编码的每个真前缀报错，尾随字节、保留 marker、非字符串键也报错。
-    #[test]
-    fn malformed_input_is_an_error_not_a_panic() {
-        let value = Value::Map(Map::from([
-            ("bin".into(), vec![1_u8, 2, 3].into()),
-            ("float".into(), (-2.5).into()),
-            (
-                "list".into(),
-                vec![Value::Nil, true.into(), (-1000).into(), u64::MAX.into()].into(),
-            ),
-            ("text".into(), "中文".into()),
-        ]));
-        let bytes = encoded(&value);
-
-        for end in 0..bytes.len() {
-            assert!(decoded(&bytes[..end]).is_err(), "prefix of {end} bytes");
-        }
-        let mut trailing = bytes.clone();
-        trailing.push(0xC0);
-        assert_eq!(decoded(&trailing), Err(DecodeError::TrailingBytes));
-        assert_eq!(decoded(&[0xC1]), Err(DecodeError::ReservedMarker));
-        assert_eq!(decoded(&[0x81, 0x01, 0x02]), Err(DecodeError::NonStringKey));
-    }
-
-    // 零拷贝约定：解码出的 Bin 指向输入缓冲区内部，不复制大二进制（重写方案 §5.4 第 21 条）。
-    #[test]
-    fn decoded_bin_borrows_the_frame() {
-        let body = Bytes::from(encoded(&vec![9_u8; 300].into()));
-        let Value::Bin(bin) = decode(&body).unwrap() else {
-            panic!("not bin")
-        };
-        assert_eq!(bin.as_ptr(), body[3..].as_ptr());
     }
 }

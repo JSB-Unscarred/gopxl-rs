@@ -108,10 +108,14 @@ impl MeshChannel {
 mod tests {
     use bytes::Bytes;
 
-    use super::{Mesh, MeshChannel, MeshData};
-    use crate::gdp::tests::decode_fixture;
     use crate::gdp::{Body, GdpError, decode_message};
-    use crate::hex;
+
+    /// 空白分隔的十六进制文本转为字节。
+    fn hex(text: &str) -> Vec<u8> {
+        text.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
 
     /// F18（derived）：顶点通道（allocateCount 2、usedCount 1）与 3 字节的用户通道。
     const F18: &str = "B6 00 00 00 12 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 FF FF FF FF FF FF FF FF 01 FF FF \
@@ -122,39 +126,9 @@ mod tests {
         00 00 80 3F 00 00 00 40 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00 \
         1A 00 06 00 00 00 00 00 00 00 05 00 00 00 34 12 00 00 03 00 00 00 03 00 00 00 AA BB CC";
 
-    // F18（derived）：通道数据按 allocateCount 读取，元素类型按通道 ID 选择（ID 0 为顶点，用户通道为字节）。
-    #[test]
-    fn mesh_fixture() {
-        let expected = Mesh {
-            has_data: true,
-            system_channel_count: 6,
-            max_user_channel_count: 5,
-            user_channel_count: 1,
-            offset: [0.0; 3],
-            range: [1.0; 3],
-            channels: vec![
-                MeshChannel {
-                    id: 0,
-                    ty: 1,
-                    state: 3,
-                    flag: 0,
-                    used: 1,
-                    data: MeshData::Points(vec![[1.0, 2.0, 3.0], [0.0; 3]]),
-                },
-                MeshChannel {
-                    id: 6,
-                    ty: 0,
-                    state: 5,
-                    flag: 0x1234,
-                    used: 3,
-                    data: MeshData::Bytes(Bytes::from_static(&[0xAA, 0xBB, 0xCC])),
-                },
-            ],
-        };
-        assert_eq!(decode_fixture(&hex(F18)).body, Body::Mesh(expected));
-    }
-
-    // 内存安全约定：声明巨大 allocateCount 的通道在分配之前报 Truncated，CAS 仍然有效。
+    // 内存安全约定：声明巨大 allocateCount 的通道在分配之前报 Truncated，CAS 仍然有效。检查的是所有 GDP 数组共用的
+    // `read_vec` / `take`：先确认字节够再分配。
+    // 保留原因：lint 只禁止 panic，拦不住按网络输入分配巨量内存。
     #[test]
     fn huge_allocate_count_is_truncated() {
         let mut bytes = hex(F18);

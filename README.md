@@ -50,6 +50,11 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `GoResponse::Raw` | 不提供 | 类型化的字段已包含全部内容 |
 | `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
+| `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致或挂起队列为空时报错，由连接层拆连接（C++ 错位后继续） |
+| `GoRestClient` 的流消息分派（`SetStreamHandler`） | `control::StreamCore::on_inbound(Inbound) -> StreamEvent` | 每个流一条连接；应答前的数据照常产出，应答之后的孤立响应忽略（C++ 当作下一个请求的应答） |
+| `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \`，生成的正则无法编译时同样报错 |
+| `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | 路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`）；路径与 `Value::pointer` 同一语法（`/` 是键 `""`，C++ 把它当作根）；`type` 为可空数组时同样导航 |
+| `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计 |
 | `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT` | 3600、3601 |
 | `GoGdpMsg::Deserialize`；`GoGdpClient` 的消息分派 | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | 每条消息都解析 CAS（C++ 跳过未知类型，丢掉 isLastMsg）；CAS 之后坏掉时为 `Body::Invalid` |
 | — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | 控制通道 `/dataSources` 流的 bin |
@@ -94,6 +99,12 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | 流状态字符串（`streaming` / `complete` / `abort`） | `control::StreamState` | 含 `Other(String)` |
 | `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
+| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；I/O 原因随连接层加入 |
+| 应答通道（C++ 的 `GoTransaction` 内部状态） | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | 由 `register` 建立的 `sync_channel(1)`，读线程持锁发送时从不阻塞；丢弃即墓碑 |
+| `GoStreamHandler` 收到的 `GoStreamResponse` 与 `stream` 的应答 | `control::StreamEvent`：`Reply`、`Data`、`End(Status)`、`Ignored` | `End` 的 `OK` 即 complete，否则是 abort 的原因；`/dataSources` 的数据可能紧跟在 `End` 之后 |
+| 服务端的 `SubscriptionExpression` | `control::SubscriptionExpr`、`control::SubExprError` | 两个正则（R、E）逐字移植后由 regex-lite 编译 |
+| `_schema`（基于 JSON Schema Draft 2019-09 的方言） | `Value` | 注解（`unit`、`visibility`、`extendedType` …）直接读取 |
+| `GoResourceValidationError::Errors()` | `schema::Issue` | 每个关键字一个变体 |
 | `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)` |
 | `CommonAttributes` | `gdp::Cas` |  |
 | `GoGdpTransform`、`GoGdpBoundingBox` | `Option<[f32; 12]>`、`Option<[f32; 6]>` | 线上顺序，保留 `f32` |

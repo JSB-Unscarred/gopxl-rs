@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod docs;
 pub mod frame;
 pub mod gdp;
+pub mod schema;
 pub mod value;
 
 pub use value::{Map, PointerError, Value};
@@ -21,6 +22,12 @@ pub(crate) fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace()
         .map(|b| u8::from_str_radix(b, 16).unwrap())
         .collect()
+}
+
+/// 测试辅助：解析 JSON 文本，测试数据按 JSON 写。
+#[cfg(test)]
+pub(crate) fn json(text: &str) -> Value {
+    text.parse().unwrap()
 }
 
 // 两份 README 中的 Rust 示例参与 doctest，避免与 API 脱节。

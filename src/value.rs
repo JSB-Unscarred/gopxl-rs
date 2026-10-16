@@ -219,7 +219,7 @@ impl Value {
 
 /// 把 JSON Pointer 拆成解除转义的 token；缺少前导 `/` 时视为有，`""` 没有 token（指向根）。
 /// 不含 `~` 的 token 直接借用，读取响应时不分配。
-fn tokens(pointer: &str) -> impl Iterator<Item = Cow<'_, str>> {
+pub(crate) fn tokens(pointer: &str) -> impl Iterator<Item = Cow<'_, str>> {
     let rest = pointer.strip_prefix('/').unwrap_or(pointer);
     (!pointer.is_empty())
         .then(|| rest.split('/'))
@@ -236,7 +236,7 @@ fn tokens(pointer: &str) -> impl Iterator<Item = Cow<'_, str>> {
 }
 
 /// 数组下标：十进制数字，除 `0` 外没有前导零（RFC 6901）。`str::parse` 只比它多接受前导 `+`。
-fn array_index(token: &str) -> Option<usize> {
+pub(crate) fn array_index(token: &str) -> Option<usize> {
     if token.starts_with('+') || (token.len() > 1 && token.starts_with('0')) {
         None
     } else {
@@ -359,10 +359,7 @@ fn from_json(json: serde_json::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::Value;
-
-    fn json(text: &str) -> Value {
-        text.parse().unwrap()
-    }
+    use crate::json;
 
     // RFC 6901 §5 的全部例子，以及 GoJsonPointer 的宽松规则（补前导 `/`）；下标不接受前导零和 `+`。
     #[test]

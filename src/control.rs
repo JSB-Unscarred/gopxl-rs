@@ -16,6 +16,9 @@
 //! response 的 `status`）。C++ SDK 忽略 `CarrierStatus`；`DataLength` 越界时读进下一帧而错位；其余情况报读错误并
 //! 丢弃该消息，等待中的请求不会失败，FIFO 随之错位；缺少 `status` 的响应被当作成功（重写方案 §5.4 第 6、7 条）。
 //! 未知的 `type`（如 `debug`）得到 [`Inbound::Other`] 由调用方忽略；C++ 把它当作响应，会错配等待中的请求。
+//!
+//! 另含不做 I/O 的协议状态机：主连接的 FIFO 对应器 [`ControlCore`]、流连接的 [`StreamCore`]，以及按服务端规则
+//! 判断通知投递的 [`SubscriptionExpr`]。
 
 #![deny(
     clippy::indexing_slicing,
@@ -24,10 +27,14 @@
     clippy::panic
 )]
 
+mod state;
 mod status;
+mod sub;
 mod url;
 
+pub use state::{ControlCore, DisconnectReason, ReplyRx, StreamCore, StreamEvent};
 pub use status::Status;
+pub use sub::{SubExprError, SubscriptionExpr};
 pub use url::{url_decode, url_encode};
 
 use bytes::{Buf, Bytes};
@@ -360,12 +367,8 @@ mod tests {
         EventType, Inbound, InboundError, Method, Notification, Request, Response, Status,
         StreamMessage, StreamState,
     };
-    use crate::hex;
     use crate::value::{Value, msgpack};
-
-    fn json(text: &str) -> Value {
-        text.parse().unwrap()
-    }
+    use crate::{hex, json};
 
     /// 服务端 carrier 帧：帧头、消息体、`DataLength` 之后的尾随字节。
     fn carrier(ty: u16, carrier_status: i32, body: &[u8], trailing: &[u8]) -> Bytes {
@@ -380,8 +383,8 @@ mod tests {
         Bytes::from(frame)
     }
 
-    /// 消息体为 `json` 的正常 carrier 帧。
-    fn message(text: &str) -> Bytes {
+    /// 消息体为 `json` 的正常 carrier 帧；`state` 的测试共用。
+    pub(super) fn message(text: &str) -> Bytes {
         let mut body = Vec::new();
         msgpack::encode(&json(text), &mut body).unwrap();
         carrier(0xB000, 1, &body, &[])

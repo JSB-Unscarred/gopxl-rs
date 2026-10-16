@@ -7,8 +7,9 @@
 //! ## 分层
 //!
 //! - 编解码：值模型（[`Value`](crate::Value)、MessagePack）、长度前缀帧（[`frame`](crate::frame)）、控制通道
-//!   消息（[`control`](crate::control)）、GDP 消息（[`gdp`](crate::gdp)）、发现报文（[`discovery`](crate::discovery)）
-//!   与协议状态机是纯函数或纯数据结构，不做 I/O、不起线程，直接用字节测试。解码输入来自网络的文件以
+//!   消息与协议状态机（[`control`](crate::control)）、GDP 消息（[`gdp`](crate::gdp)）、发现报文
+//!   （[`discovery`](crate::discovery)）与 schema 校验（[`schema`](crate::schema)）是纯函数或纯数据结构，不做 I/O、
+//!   不起线程，直接用字节测试。解码输入来自网络的文件以
 //!   `#![deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used, clippy::panic)]` 开头（子模块继承），
 //!   读取都经过 `bytes::Buf` 的 `try_get_*`，坏输入只得到 `Err`；
 //! - 连接：每种连接类型读写自己的 socket，把字节交给编解码层，相当于 FFI 封装中“方法直接调用 `sys`”。
@@ -25,6 +26,12 @@
 //! - [`FrameReader`](crate::frame::FrameReader) 为每帧按长度精确分配一块内存，返回的 `Bytes` 独占它；解码出的
 //!   零拷贝切片（`Value::Bin`、GDP 的强度、图像像素、Mesh 字节通道与未知类型的消息体）只让自己所在的帧存活。
 //!   GDP 的多字节数组（`i16`、`f32` …）解码为自有的 `Vec`，不引用帧。
+//! - [`ControlCore`](crate::control::ControlCore) 拥有每个已写出、未应答请求的应答发送端；`register` 建立
+//!   `sync_channel(1)`，把接收端（[`ReplyRx`](crate::control::ReplyRx)）交给调用方。调用方超时即丢弃接收端：槽位
+//!   成为墓碑，仍按 FIFO 吸收迟到的响应，不从队列中删除（删除会让后面的响应全部错位）。每个槽位只发送一次：
+//!   响应到达时，或拆连接时由 `fail_all` 以断开原因完成，所以读线程持锁发送时从不阻塞。
+//! - [`StreamCore`](crate::control::StreamCore) 与 [`SubscriptionExpr`](crate::control::SubscriptionExpr) 只持有
+//!   自己的状态（是否已应答、编译好的正则），不引用连接。
 //!
 //! ## 阻塞
 //!
@@ -51,4 +58,13 @@
 //!   信封或 CAS 坏掉时 `decode_message` 返回 `Err`；CAS 之后的部分坏掉时消息仍然返回，`body` 为
 //!   `Body::Invalid`，`cas.is_last_msg` 照样能结束数据集；
 //! - [`discovery::DiscoveryError`](crate::discovery::DiscoveryError)：丢弃这条数据报、继续接收；`Command` 是其他
-//!   客户端（或自己）发出的命令，不是错误报文。Announce 的单个字段缺失或类型不对时取默认值，不报错。
+//!   客户端（或自己）发出的命令，不是错误报文。Announce 的单个字段缺失或类型不对时取默认值，不报错；
+//! - [`control::DisconnectReason`](crate::control::DisconnectReason)：连接必须拆掉，所有挂起的请求以同一个
+//!   `Arc` 原因失败。`Decode` 是坏帧；`Unsolicited`（挂起队列为空时收到响应）与 `Desync`（响应的 `path` 与队首
+//!   请求不同）说明 FIFO 已经或可能错位，拆连接好过把响应交给错误的调用方。流连接上的坏帧直接是
+//!   `InboundError`；应答之后的孤立响应不是错误，忽略；
+//! - [`control::SubExprError`](crate::control::SubExprError)：订阅表达式含正则元字符，或生成的正则无法编译（例如
+//!   `?`），本地无法与服务端一致地匹配，不发送；
+//! - schema：[`schema_for_path`](crate::schema::schema_for_path) 找不到路径时为 `None`，表示“不约束”；
+//!   [`validate`](crate::schema::validate) 返回 [`Issue`](crate::schema::Issue) 列表，空表即通过。校验只是建议性的，
+//!   服务端才是裁判。

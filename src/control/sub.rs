@@ -1,0 +1,277 @@
+//! 订阅表达式的匹配：按服务端的规则判断一条通知是否属于某个订阅（`GoApi::SubscriptionExpression`）。
+//!
+//! 服务端为每个表达式生成两个 ECMAScript 正则，对通知的路径做整串匹配：
+//! - R（`created`、`updated`、`deleted` 与未知事件）：转义 `. : + $`；`**` → `*` → `.*`，所以 `*` 跨越 `/`；
+//!   `?` → `.`；结尾的 `/.*` 换成 `(/.*)?`，所以 `/tools/*` 也匹配 `/tools`；
+//! - E（`embeddedUpdated`）：以 `/` 开头时每个 `/` 换成 `(/` 并在末尾补 n−1 个 `)?` 和一个 `)`，于是匹配表达式
+//!   路径的每一级祖先（根除外）；转义与通配同 R，但 `?` 不转换，是正则量词。另外，`/` 上的 `embeddedUpdated`
+//!   投给每个订阅。
+//!
+//! C++ SDK 在本地按精确路径、前缀与祖先回溯分派，与服务端的投递不一致（重写方案 §5.4 第 17 条）；这里逐字移植
+//! 服务端的变换，再用 regex-lite 编译。
+
+use std::borrow::Cow;
+
+use regex_lite::Regex;
+
+use super::EventType;
+
+/// 一个订阅表达式（`sub` 请求的 `path`），判断服务端会不会因为它投递一条通知。
+#[derive(Clone, Debug)]
+pub struct SubscriptionExpr {
+    text: String,
+    is_match: Regex,
+    is_embedded_match: Regex,
+}
+
+/// [`SubscriptionExpr::new`] 的错误：表达式含正则元字符，或生成的正则无法编译。携带原表达式。
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported subscription expression {0:?}")]
+pub struct SubExprError(pub String);
+
+impl SubscriptionExpr {
+    /// 编译表达式。
+    ///
+    /// 含 `| ( ) [ ] { } ^ \` 时报错：服务端把它们原样交给 ECMAScript 正则，而 regex-lite 在字符类、反向引用、
+    /// 断言等语法上与之不同（GoPxL PC 版的 MSVC `std::regex` 还会对单独的 `]`、`}` 抛异常）。不含它们时两边只用到
+    /// 字面字符、`.`、`.*`、分组与 `?` 量词；`(?R)` 让 `.` 与 ECMAScript 一样不匹配 `\r`、`\n`，再按字节匹配，结果
+    /// 与服务端相同。生成的正则无法编译（例如 `?`）或超过 regex-lite 的嵌套上限（约 16 级 `/`，已知的资源路径
+    /// 不超过 10 级）时同样报错。
+    pub fn new(text: &str) -> Result<Self, SubExprError> {
+        let error = || SubExprError(text.to_owned());
+        if text.contains(['|', '(', ')', '[', ']', '{', '}', '^', '\\']) {
+            return Err(error());
+        }
+        let compile =
+            |source: String| Regex::new(&format!("(?R)^(?:{source})$")).map_err(|_| error());
+        let bytes = bytes(text);
+        Ok(Self {
+            text: text.to_owned(),
+            is_match: compile(match_source(&bytes))?,
+            is_embedded_match: compile(embedded_source(&bytes))?,
+        })
+    }
+
+    /// 表达式原文，即 `sub` / `unSub` 请求的 `path`。
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// 服务端是否会因为这个订阅投递该事件（`AsyncChannel::IsSubscribed`）。
+    pub fn delivers(&self, event: &EventType, path: &str) -> bool {
+        let bytes = bytes(path);
+        match event {
+            EventType::EmbeddedUpdated => path == "/" || self.is_embedded_match.is_match(&bytes),
+            _ => self.is_match.is_match(&bytes),
+        }
+    }
+}
+
+/// 服务端的 `std::regex` 在 `std::string` 上按字节匹配：R 的 `.` 只吃一个字节，E 的 `?` 只作用于前一个字节。
+/// 把每个字节映射为 U+0000..=U+00FF（regex-lite 不把其中的非 ASCII 字符当作元字符），这里的匹配就同样按字节；
+/// 纯 ASCII 时直接借用，不分配。
+fn bytes(text: &str) -> Cow<'_, str> {
+    if text.is_ascii() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.bytes().map(char::from).collect())
+    }
+}
+
+/// R 的正则源串（`WildcardToRegex`）。服务端的 `FindAndReplaceAll` 从替换文本之后继续查找，等价于 `str::replace`。
+fn match_source(text: &str) -> String {
+    let source = wildcards(&escape(text)).replace('?', ".");
+    match source.strip_suffix("/.*") {
+        Some(head) => format!("{head}(/.*)?"),
+        None => source,
+    }
+}
+
+/// E 的正则源串（`WildcardToRegexEmbedded`）：不以 `/` 开头的表达式不加分组。
+fn embedded_source(text: &str) -> String {
+    let nested = if text.starts_with('/') {
+        let levels = text.matches('/').count();
+        format!("{}{})", text.replace('/', "(/"), ")?".repeat(levels - 1))
+    } else {
+        text.to_owned()
+    };
+    wildcards(&escape(&nested))
+}
+
+/// 转义服务端会转义的四个字符（`EscapeRegexHelper`），其余元字符由 [`SubscriptionExpr::new`] 拒绝。
+fn escape(text: &str) -> String {
+    text.replace('.', r"\.")
+        .replace(':', r"\:")
+        .replace('+', r"\+")
+        .replace('$', r"\$")
+}
+
+/// `**` → `*` → `.*`（`ConvertRegexWildCards`）。
+fn wildcards(text: &str) -> String {
+    text.replace("**", "*").replace('*', ".*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SubExprError, SubscriptionExpr, embedded_source, match_source};
+    use crate::control::EventType;
+
+    // 服务端规则（fill2 §E，重写方案 §1.4.8 的表，修 C++ 的第 17 条）：R / E 源串与逐字移植的结果一致，
+    // 匹配结果符合表中的 m / e 判定：`*` 跨越 `/`，`/a/*` 匹配 `/a`，精确路径收不到子项的事件，
+    // E 匹配祖先、`?` 在 R 中是单字符而在 E 中是量词。
+    #[test]
+    fn sources_and_matches_follow_server_rules() {
+        /// (表达式, R, E, [(路径, R 是否匹配, E 是否匹配)])
+        type Case = (
+            &'static str,
+            &'static str,
+            &'static str,
+            &'static [(&'static str, bool, bool)],
+        );
+        let cases: [Case; 10] = [
+            (
+                "/tools",
+                "/tools",
+                "(/tools)",
+                &[
+                    ("/tools", true, true),
+                    ("/tools/X", false, false),
+                    ("/", false, false),
+                ],
+            ),
+            (
+                "/tools/*",
+                "/tools(/.*)?",
+                "(/tools(/.*)?)",
+                &[
+                    ("/tools", true, true),
+                    ("/tools/", true, true),
+                    ("/tools/X/inputs/0", true, true),
+                    ("/toolsX", false, false),
+                ],
+            ),
+            (
+                "/tools/T-0",
+                "/tools/T-0",
+                "(/tools(/T-0)?)",
+                &[
+                    ("/tools", false, true),
+                    ("/tools/T-0", true, true),
+                    ("/tools/T-0/inputs/0", false, false),
+                ],
+            ),
+            (
+                "/tools/Profile*/inputs/*",
+                "/tools/Profile.*/inputs(/.*)?",
+                "(/tools(/Profile.*(/inputs(/.*)?)?)?)",
+                &[
+                    ("/tools/ProfileA/inputs", true, true),
+                    ("/tools/Profile/x/inputs/0", true, true),
+                    ("/tools/P/inputs/0", false, false),
+                ],
+            ),
+            (
+                "/tools/T?",
+                "/tools/T.",
+                "(/tools(/T?)?)",
+                &[
+                    ("/tools/T1", true, false),
+                    ("/tools/T", false, true),
+                    ("/tools", false, true),
+                ],
+            ),
+            (
+                "/",
+                "/",
+                "(/)",
+                &[("/", true, true), ("/tools", false, false)],
+            ),
+            (
+                "/*",
+                "(/.*)?",
+                "(/.*)",
+                &[("", true, false), ("/a/b", true, true)],
+            ),
+            ("*", ".*", ".*", &[("", true, true), ("/a", true, true)]),
+            (
+                "/a.b:c+d$/**",
+                r"/a\.b\:c\+d\$(/.*)?",
+                r"(/a\.b\:c\+d\$(/.*)?)",
+                &[("/a.b:c+d$/x", true, true), ("/aXb:c+d$", false, false)],
+            ),
+            (
+                "/tools/",
+                "/tools/",
+                "(/tools(/)?)",
+                &[("/tools", false, true), ("/tools/", true, true)],
+            ),
+        ];
+        let updated = EventType::Updated;
+        let embedded = EventType::EmbeddedUpdated;
+        for (text, r, e, paths) in cases {
+            assert_eq!(
+                (match_source(text).as_str(), embedded_source(text).as_str()),
+                (r, e),
+                "{text}"
+            );
+            let expr = SubscriptionExpr::new(text).unwrap();
+            for &(path, m, em) in paths {
+                // `/` 上的 embeddedUpdated 投给每个订阅，不看 E。
+                let em = em || path == "/";
+                assert_eq!(
+                    (
+                        expr.delivers(&updated, path),
+                        expr.delivers(&embedded, path)
+                    ),
+                    (m, em),
+                    "{text} on {path}"
+                );
+            }
+        }
+        // 未知事件与 created / deleted 一样用 R。
+        let expr = SubscriptionExpr::new("/tools/T-0").unwrap();
+        assert!(!expr.delivers(&EventType::Other("Unknown".into()), "/tools"));
+        assert!(expr.delivers(&EventType::Deleted, "/tools/T-0"));
+    }
+
+    // 与服务端的 std::regex 一致（期望值来自对服务端变换的 C++ 移植）：`.` 不匹配 `\r`；按字节匹配，所以 R 的
+    // `?` 只吃一个字节、E 的 `?` 只作用于多字节字符的最后一个字节。
+    #[test]
+    fn matching_is_bytewise_and_skips_line_terminators() {
+        let cases = [
+            ("/a/*", "/a/x\ry", false, false),
+            ("/tools/T?", "/tools/T\r", false, false),
+            ("/jobs/files/工位?", "/jobs/files/工位二", false, false),
+            ("/tools/T??", "/tools/Tä", true, false),
+            ("/aé?", "/a", false, false),
+            ("/aé?", "/aé", false, true),
+            ("/t/工*", "/t/工位", true, true),
+        ];
+        for (text, path, m, e) in cases {
+            let expr = SubscriptionExpr::new(text).unwrap();
+            assert_eq!(
+                (
+                    expr.delivers(&EventType::Updated, path),
+                    expr.delivers(&EventType::EmbeddedUpdated, path)
+                ),
+                (m, e),
+                "{text} on {path:?}"
+            );
+        }
+    }
+
+    // 活的正则元字符在 regex-lite 中语义不同，一律拒绝；无法编译的正则同样报错；其余表达式（含不以 `/` 开头的）
+    // 都能编译。
+    #[test]
+    fn regex_metacharacters_are_rejected() {
+        for text in ["/a|/b", "/a(", "/a)", "/a[0]", "/a{2}", "^/a", r"/a\d", "?"] {
+            assert_eq!(
+                SubscriptionExpr::new(text).unwrap_err(),
+                SubExprError(text.into())
+            );
+        }
+        for text in ["", "tools", "/a??", "/**/x"] {
+            assert!(SubscriptionExpr::new(text).is_ok(), "{text}");
+        }
+    }
+}

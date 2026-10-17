@@ -9,30 +9,16 @@
 
 mod common;
 
-use common::{SCANNER_PATH, SENSOR_PATH};
+use common::{
+    ACTIVE_AREA_PATH, DIGITAL_OUTPUT_PATH, DIO_TRIGGER_EVENT_PATH, DIO_TRIGGER_SOFTWARE,
+    EXPOSURE_MODE_MULTI, EXPOSURE_MODE_PATH, EXPOSURE_MODE_SINGLE, MULTI_EXPOSURE_PATH,
+    SCANNER_PATH, SENSOR_PATH, SINGLE_EXPOSURE_PATH, TRIGGER_MODE_SOFTWARE, TRIGGER_SOURCE_PATH,
+    section, trigger_event_name,
+};
 use gopxl::control::Handle;
 use gopxl::value::Value;
 
-/// 扫描器参数中的触发源。
-const TRIGGER_SOURCE_PATH: &str = "/parameters/triggerSettings/source";
-/// 触发源：软件。
-const TRIGGER_MODE_SOFTWARE: i64 = 3;
-/// 曝光模式：单次。
-const EXPOSURE_MODE_SINGLE: i64 = 0;
-/// 曝光模式：多次。
-const EXPOSURE_MODE_MULTI: i64 = 1;
-// 传感器参数中的曝光模式、单次曝光、多次曝光与有效区域。
-const EXPOSURE_MODE_PATH: &str = "/parameters/exposureSettings/exposureMode";
-const SINGLE_EXPOSURE_PATH: &str = "/parameters/exposureSettings/singleExposure";
-const MULTI_EXPOSURE_PATH: &str = "/parameters/exposureSettings/multipleExposures";
-const ACTIVE_AREA_PATH: &str = "/parameters/activeAreaSettings/activeArea";
-
-const DIGITAL_OUTPUT_PATH: &str = "/controls/digitalOutput";
 const DIGITAL_OUTPUT_PORT_PATH: &str = "/controls/digitalOutput/devices/device-0/ports/port-0";
-/// 端口参数中的触发事件。
-const DIO_TRIGGER_EVENT_PATH: &str = "/parameters/triggerEvent";
-/// 触发事件：软件。
-const DIO_TRIGGER_SOFTWARE: i64 = 2;
 
 fn main() -> common::Result {
     let system = common::connect()?;
@@ -165,24 +151,4 @@ fn report<T>(result: gopxl::Result<T>) {
     if let Err(error) = result {
         eprintln!("Error: {error}");
     }
-}
-
-/// 数字输出触发事件的名称。
-fn trigger_event_name(event: i64) -> Option<&'static str> {
-    Some(match event {
-        1 => "Measurement",
-        2 => "Software",
-        3 => "Alignment",
-        4 => "Exposure Begin",
-        5 => "Exposure End",
-        6 => "Part Detection",
-        7 => "System State",
-        _ => return None,
-    })
-}
-
-/// 打印小节标题，对应 C++ 的 `PrintSectionHeader`。
-fn section(title: &str) {
-    let rule = "=".repeat(81);
-    println!("\n{rule}\n{title}\n{rule}\n");
 }

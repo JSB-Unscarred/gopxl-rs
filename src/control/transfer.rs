@@ -25,7 +25,16 @@ impl Handle {
     ///
     /// 下载的 `Bin` 直接引用响应帧，峰值内存约为文件大小；上传的 `Bin` 编码时复制进帧，峰值约为两倍，写出之后即
     /// 释放（服务端处理恢复、升级可能要几分钟，等待期间不占着上传的数据）。超时或连接出错时连接即丢弃，不影响主连接。
+    /// 变更请求（恢复、升级、上传）结束后计入连接的写计数（资源缓存据此失效），无论成败：服务端可能已经执行。
     pub fn transfer(&self, request: Request, timeout: Duration) -> Result<Response> {
+        let method = request.method;
+        let result = self.exchange(request, timeout);
+        self.shared.count_write(method);
+        result
+    }
+
+    /// 连接、写出 `request`、读到第一条响应。
+    fn exchange(&self, request: Request, timeout: Duration) -> Result<Response> {
         let frame = encode(&request)?;
         let Request {
             method,

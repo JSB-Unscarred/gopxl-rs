@@ -49,8 +49,36 @@ pub const SCAN_MODE_IMAGE: i64 = 0;
 pub const SCAN_MODE_PROFILE: i64 = 2;
 /// 扫描模式：表面。
 pub const SCAN_MODE_SURFACE: i64 = 3;
+/// 扫描器参数中的触发源。
+pub const TRIGGER_SOURCE_PATH: &str = "/parameters/triggerSettings/source";
 /// 触发模式：时间。
 pub const TRIGGER_MODE_TIME: i64 = 0;
+/// 触发模式：软件。
+pub const TRIGGER_MODE_SOFTWARE: i64 = 3;
+
+/// 对准状态（扫描器 `alignment` 的 `alignState`）：未对准。
+pub const UNALIGNED: i64 = 0;
+/// 对准状态：已对准。
+pub const ALIGNED: i64 = 1;
+/// 对准状态：对准中。
+pub const ALIGNING: i64 = 2;
+
+// 传感器参数中的曝光模式、单次曝光、多次曝光与有效区域。
+pub const EXPOSURE_MODE_PATH: &str = "/parameters/exposureSettings/exposureMode";
+pub const SINGLE_EXPOSURE_PATH: &str = "/parameters/exposureSettings/singleExposure";
+pub const MULTI_EXPOSURE_PATH: &str = "/parameters/exposureSettings/multipleExposures";
+pub const ACTIVE_AREA_PATH: &str = "/parameters/activeAreaSettings/activeArea";
+/// 曝光模式：单次。
+pub const EXPOSURE_MODE_SINGLE: i64 = 0;
+/// 曝光模式：多次。
+pub const EXPOSURE_MODE_MULTI: i64 = 1;
+
+/// 数字输出。
+pub const DIGITAL_OUTPUT_PATH: &str = "/controls/digitalOutput";
+/// 数字输出端口参数中的触发事件。
+pub const DIO_TRIGGER_EVENT_PATH: &str = "/parameters/triggerEvent";
+/// 触发事件：软件。
+pub const DIO_TRIGGER_SOFTWARE: i64 = 2;
 
 /// 对准、作业加载、恢复等耗时命令的超时；其余请求用默认的 3 s。
 pub const EXTENDED_TIMEOUT: Duration = Duration::from_secs(30);
@@ -120,6 +148,26 @@ pub fn text(value: &Value) -> String {
     value
         .as_str()
         .map_or_else(|| value.to_string(), str::to_owned)
+}
+
+/// 打印小节标题，对应 C++ 的 `PrintSectionHeader`。
+pub fn section(title: &str) {
+    let rule = "=".repeat(81);
+    println!("\n{rule}\n{title}\n{rule}\n");
+}
+
+/// 数字输出触发事件的名称。
+pub fn trigger_event_name(event: i64) -> Option<&'static str> {
+    Some(match event {
+        1 => "Measurement",
+        2 => "Software",
+        3 => "Alignment",
+        4 => "Exposure Begin",
+        5 => "Exposure End",
+        6 => "Part Detection",
+        7 => "System State",
+        _ => return None,
+    })
 }
 
 /// 读 `/replay/playback`，打印并返回用的是否是回放数据。

@@ -23,9 +23,9 @@ libraries.
 
 ## Examples
 
-`examples/` ports the official C++ samples (`ResourceApi` comes with the resource layer) with the same requests,
-order and timeouts; sample defects fixed while porting are listed at the top of each example. The device address
-comes from the `GOPXL_IP` environment variable (`IP` or `IP:port`), `192.168.1.10:3600` by default:
+`examples/` ports the official C++ samples with the same requests, order and timeouts; sample defects fixed while
+porting are listed at the top of each example. The device address comes from the `GOPXL_IP` environment variable
+(`IP` or `IP:port`), `192.168.1.10:3600` by default:
 
 ```bash
 GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
@@ -40,6 +40,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `ReceiveImage`, `Receive2dImage`, `Acquire2dImage` | `receive_image`, `receive_2d_image`, `acquire_2d_image` |
 | `ReceiveMetrics` | `receive_metrics` |
 | `SaveJob`, `BackupRestore`, `ReplayData`, `SystemUpgrade` | `save_job`, `backup_restore`, `replay_data`, `system_upgrade` |
+| `ResourceCommands`, `ResourceConfigureSensor`, `ResourceConfigureTool`, `ResourceSchema`, `ResourceSubscriptions` (`ResourceApi`) | `resource_commands`, `resource_configure_sensor`, `resource_configure_tool`, `resource_schema`, `resource_subscriptions` |
 
 ## Implemented interfaces
 
@@ -107,6 +108,40 @@ implemented.
 | Path matching of `GoRestClient::AddNotificationListener` | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`, `delivers(&EventType, &str) -> bool`, `text()` | Server rules: `*` crosses `/`, `/a/*` also matches `/a`, `embeddedUpdated` matches ancestors (C++ uses prefix and ancestor walks that disagree with the server); like the server, matching is byte-wise and `.` does not match `\r` or `\n`; regex metacharacters `\| ( ) [ ] { } ^ \` and NUL (the server truncates the expression at a NUL) are rejected, and so is an expression whose generated regex does not compile |
 | `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | `None` when the path is not in the schema (C++ throws `GoResourceError`); paths use the same syntax as `Value::pointer` (`/` is the key `""`, which C++ treats as the root); also navigates when `type` is a nullable array |
 | `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | An empty list means valid; `binary` requires `Bin`, nullable type arrays are supported, `multipleOf` is correct for negative values, integers in `enum` compare exactly, an empty `enum` imposes no constraint, lengths count characters; `type: "null"` accepts only `Nil` (C++ does not know it and accepts every value) |
+| `GoSystem::Resource` | `System::resource(impl Into<String>) -> resource::Resource` | Validation before writes is on (as with `GoSystem`'s resource manager); every call returns an independent `Resource` with its own cache |
+| `GoResource::GoResource(client, uri)` | `Resource::new(Handle, impl Into<String>) -> Resource` | Sends nothing; 5 s timeout, expand level 0, no validation |
+| `GoResource` copy constructor and assignment | Not provided | The cache and the subscription have one owner; for a second one use `Resource::new(r.handle().clone(), r.path())` |
+| `GoResource::Uri` | `Resource::path() -> &str` |  |
+| `GoResource::SetTimeout`, `Timeout` | `Resource::set_timeout(Duration)`, `timeout()` | 5 s by default |
+| `GoResource::SetExpandLevel`, `ExpandLevel` | `Resource::set_expand_level(i32)`, `expand_level()` | Setting it drops the data cache, so the cache always matches the current level |
+| `GoResource::Data` | `Resource::data() -> Result<&Value>` | Reads the server when the cache is empty or stale, with read args `{expandLevel, includeSchema: false}`; the cache goes stale after any `create` / `update` / `delete` / `call` on the same connection (file transfers included), after a notification on the subscription, or after the connection is lost (replacing C++ `SetNonIdempotentRequestHandler` and `ResetConnectionState`); C++ `Cache` (always re-reads) is `invalidate()` followed by `data()` |
+| `GoResource::GetBool`, `GetInt`, `GetInt64`, `GetFloat`, `GetDouble`, `GetString`, `GetObject`, `GetProp` | `Resource::get(&str, impl FnOnce(&Value) -> Option<T>) -> Result<T>`, e.g. `get(ptr, Value::as_i64)`, `get(ptr, Some)` | `Error::Payload` when the field is missing or has the wrong type (C++ throws `GoResourceError`); integers do not truncate floats |
+| `GoResource::InvalidateCache` | `Resource::invalidate()` | Drops the data and schema caches |
+| `GoResource::HasRemoteChanges` | `Resource::has_remote_changes() -> bool` | Whether the next `data` reads the server; also `true` before the first read |
+| `GoResource::SetBool`, `SetInt`, `SetInt64`, `SetFloat`, `SetDouble`, `SetString`, `SetProp` | `Resource::set(&str, impl Into<Value>) -> Result<()>` | An `update` with just this value, sent immediately |
+| `GoResource::SetJson`, `Update(payload)`; `ScopedUpdate`, `BeginUpdate`, `EndUpdate`, `Flush`, `GoUpdateScope` | `Resource::update(impl Into<Value>) -> Result<()>` | Put several changes into one patch with `Value::set` and send it once; with validation on, every non-object value in the patch is checked against the schema node at its position (as `Set*` does; C++ `SetJson` does not validate), and a value judged invalid triggers one schema re-read first (the schema changes with device state; C++ only uses the cached schema) |
+| `GoResource::CancelUpdate`, `IsUpdateCancelled`, `IsUpdateDeferred`, `DiscardPending`; `GoUpdateScope::Cancel` | Not provided | The patch stays in the caller's hands, so not sending it cancels it; there is no shared pending patch (C++ `Flush` loses the patch on failure, and a scope's exception path clears the outer scope's changes) |
+| `GoResource::Schema` | `Resource::schema() -> Result<&Value>` | Read args `{includeSchema: true}`; updates only the schema cache (C++ overwrites an expanded data cache with unexpanded data); `Nil` when there is no `_schema` |
+| `GoResource::SchemaFor` | `schema::schema_for_path(resource.schema()?, &str)` | `None` when the path is not in the schema (C++ throws `GoResourceError`) |
+| `GoResource::Validate` | `Resource::validate(&str, &Value) -> Result<Vec<Issue>>` | An empty list means valid; positions outside the schema are unconstrained |
+| `GoResource::EnableValidation`, `IsValidationEnabled` | `Resource::set_validation(bool)`, `validation_enabled()` | On by default for resources from `System::resource` |
+| `GoResource::Subscribe`, `Unsubscribe`, `IsSubscribed` | `Resource::subscribe() -> Result<()>`, `unsubscribe()`, `is_subscribed()` | Subscribes `<path>/*`, so children's `created` / `deleted` arrive (C++ subscribes the exact path); subscribing drops the data cache; `extId=` paths and non-canonical paths (not starting with `/`, empty segments) receive no notifications (notifications carry canonical paths); unsubscribing drains the queue first; unsubscribing and drop do not wait for the `unSub` reply (the C++ destructor blocks up to 5 s) |
+| `GoResource::Links`, `Embedded`, `CallArguments` | `data()?["_links"]`, `data()?["_embedded"]`, `data()?.pointer("/parameters")` |  |
+| `GoResource::ChildUris`, `ChildCount` | `Resource::child_paths(&str) -> Result<Vec<String>>` and its length | Relation names are in `resource::rel`; a relation that is a single object is read too (C++ returns nothing) |
+| `GoResource::Children` | `Resource::children(&str) -> Result<Vec<Resource>>` | Children inherit the timeout and validation settings; with a non-zero expand level the entries go into the children's caches and the children get the next level (C++ guesses expansion from the key count and caches links that carry `ordIndex` as data) |
+| `GoResource::Child` | `Resource::child(&str) -> Resource` | Sends nothing; inherits the timeout and validation settings |
+| `GoResource::CreateChild` | `Resource::create_child(impl Into<Value>) -> Result<Resource>` | The new path is the response's `path`, else `_links.self.href`; `Error::Payload` when neither exists |
+| `GoResource::Delete`, `DeleteChild` | `Resource::delete(self) -> Result<()>` | Consumes the resource; `notFound` also counts as success; delete children through resources from `children`, or `Resource::new` on an absolute path from `child_paths` |
+| `GoResource::DeleteAllChildren` | `delete()` each of `children(rel)?` |  |
+| `GoResource::Call`, `CallCommand`, `CallAction` | `Resource::call(impl Into<Value>)`, `command(&str, impl Into<Value>)`, `action(&str, impl Into<Value>)`, all returning `Transaction` | The timeout is the resource's, changeable with `Transaction::timeout`; `notFound` does not mark the resource deleted (C++ marks the parent when a command or action fails) |
+| `GoResource::CommandNames`, `ActionNames` | `Resource::command_names()`, `action_names() -> Result<Vec<String>>` | Actions read both `go:action` and `go:actions` (the manual's sensor example uses the plural) |
+| `GoResource::Read`, `Read(args)`, `Update(payload, args)` | `send(Request)` on `Resource::handle()` | Requests with arbitrary args do not touch the cache |
+| `GoResource::IsDeleted`, `IsManaged`; `SetAutoFetchSchema`, `AutoFetchSchema`, `SetAutoInvalidation`, `AutoInvalidation` | Not provided | A deleted resource has been consumed, and a deletion elsewhere shows up as `notFound` on the next read; there is no manager; the schema is read and cached separately; the resource's own writes always make the cache stale (turning off C++ `AutoInvalidation` only affects subscribed resources, which then return old data) |
+| `GoResourceManager::GetOrCreate`, `SetAutoValidation`, `AutoValidation` | `System::resource` (validation on), `Resource::new` (no validation) | No identity map: the write counter and subscriptions make each cache go stale on its own |
+| `GoResourceManager::SetAutoSubscribe`, `SubscribeAll`, `UnsubscribeAll`, `EnableValidationAll`, `DisableValidationAll`, `InvalidateAll`, `Remove`, `Cleanup`; `GoSystem::ResourceManager` | Not provided | Resources are owned by the caller and there is no central registry: call `subscribe`, `set_validation` or `invalidate` on the resources you hold, and drop them when no longer needed |
+| `GoResourceManager::ResetConnectionState` | Not provided | Caches go stale automatically when the connection is lost; there is no reconnect, so recreate the `System` and the resources |
+| `GoResourceManager::SetSubscriptionOptimizedInvalidation`, `SubscriptionOptimizedInvalidation` | Not provided | Subscribed resources also go stale with the write counter (as if C++ turned the optimization off); subscriptions only detect changes by other clients and the device itself, so a write is never followed by data older than its notification |
+| `GoResourceManager::Client` | `Resource::handle() -> &Handle` |  |
 | `GO_PXL_SDK_DEFAULT_CONTROL_PORT`, `GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`, `gdp::DEFAULT_PORT` | 3600, 3601 |
 | `GoGdpMsg::Deserialize`; message dispatch in `GoGdpClient` | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | The CAS is parsed for every message (C++ skips unknown types and loses isLastMsg); a broken part after the CAS gives `Body::Invalid` |
 | — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | The bin of a control-channel `/dataSources` stream |
@@ -152,7 +187,7 @@ Filled in as each layer is implemented.
 | `kStatus` | `control::Status(i32)` with every constant (including −975 `OVERHEAT`) | Values outside the table are kept as is |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`, `control::InboundError` |  |
 | Disconnects reported through `SetDisconnectHandler` (C++ gives no reason) | `control::DisconnectReason`: `Closed`, `Eof`, `Read`, `Write`, `Decode`, `Unsolicited`, `Desync` | Every pending request fails with the same `Arc` reason; stream and GDP connections report their disconnects with it too |
-| `GoChannelError`, `GoRequestError` (.NET `GoChannelException`, `GoRequestException`) | `Error`: `Connect`, `Timeout`, `Disconnected`, `Request(Box<RequestError>)`, `Payload`, `InvalidArgument`; `RequestError` carries the method, path and full `Response` | `Display` includes the description of the first `payload.errors` entry; with an OK `status`, `payload.errors` is not turned into an error (same as the SDK); `Payload` means a field `System` reads is missing or has the wrong type (C++ throws `GoJsonError`) |
+| `GoChannelError`, `GoRequestError` (.NET `GoChannelException`, `GoRequestException`) | `Error`: `Connect`, `Timeout`, `Disconnected`, `Request(Box<RequestError>)`, `Payload`, `Validation`, `InvalidArgument`; `RequestError` carries the method, path and full `Response` | `Display` includes the description of the first `payload.errors` entry; with an OK `status`, `payload.errors` is not turned into an error (same as the SDK); `Payload` means a field `System`, `Resource::get` or `create_child` reads is missing or has the wrong type (C++ throws `GoJsonError` / `GoResourceError`); for `Validation` see `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`: `Ready`, `Running`, `Conflict`, `Other(i64)` | 0, 1, 2 and values outside the table |
 | `GoTransaction` | `control::Transaction` |  |
 | Reply channel (internal state of a C++ `GoTransaction`) | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | A `sync_channel(1)` created by `register`, so the reader thread never blocks when it sends under the lock; dropping it makes a tombstone |
@@ -164,6 +199,11 @@ Filled in as each layer is implemented.
 | The server's `SubscriptionExpression` | `control::SubscriptionExpr`, `control::SubExprError` | Both regexes (R, E) are ported verbatim and compiled with regex-lite |
 | `_schema` (a dialect based on JSON Schema Draft 2019-09) | `Value` | Annotations (`unit`, `visibility`, `extendedType` …) are read directly |
 | `GoResourceValidationError::Errors()` | `schema::Issue` | One variant per keyword |
+| `GoRelationType` | `resource::rel`: `ITEM`, `SCANNER`, `SUB_TASK`, `CONTENT`, `COMMAND`, `ACTION` | `GoResource::DEFAULT_RELATION_TYPE` is `ITEM`; Rust methods take the relation explicitly |
+| `GoResource::DEFAULT_TIMEOUT_MS`, `DEFAULT_EXPAND_LEVEL` | The defaults of `Resource::new`: 5 s, 0 |  |
+| `GoResourceError` | `Error::Payload` (a field `get` reads is missing or has the wrong type, or the `create_child` response has no new path) | The other C++ throw sites (deleted resource, missing manager, unbalanced `EndUpdate`) do not exist in Rust |
+| `GoResourceValidationError` | `Error::Validation { path, pointer, issues }` | `Errors()` is `issues`; `pointer` is the position of the invalid value in the patch |
+| HAL relations (array, single object, `[]`, nil or absent) | `Resource::child_paths`, `children`, `command_names` and `action_names` read them as a list of entries | The server writes a single object when there is exactly one reference |
 | `GoGdpMsg`; `MessageType` | `gdp::Message`; the variants of `gdp::Body` | Unknown types become `Body::Unknown(Bytes)` |
 | `CommonAttributes` | `gdp::Cas` |  |
 | `GoGdpTransform`, `GoGdpBoundingBox` | `Option<[f32; 12]>`, `Option<[f32; 6]>` | Wire order, kept as `f32` |

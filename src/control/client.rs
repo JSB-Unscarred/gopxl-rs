@@ -17,6 +17,7 @@ use std::fmt;
 use std::io::{BufReader, Write};
 use std::net::SocketAddr;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -55,6 +56,7 @@ impl Client {
             link: Link::new(net::connect(addr, CONNECT_TIMEOUT)?),
             writer: Mutex::default(),
             dispatch: Mutex::default(),
+            writes: AtomicU64::new(0),
         });
         let reader = Arc::clone(&shared);
         thread::Builder::new()
@@ -116,6 +118,8 @@ pub(super) struct Shared {
     pub(super) writer: Mutex<Leases>,
     /// 分派锁：读线程处理每一帧时持有。
     pub(super) dispatch: Mutex<Dispatch>,
+    /// 经这条连接发出的变更请求数，见 [`Handle::write_count`]。
+    writes: AtomicU64,
 }
 
 /// 分派锁保护的状态：读线程按帧更新 FIFO 对应器与订阅队列，拆连接在同一个临界区里取走断开回调。
@@ -164,6 +168,16 @@ impl Shared {
         }
     }
 
+    /// 可能改变服务端状态的请求（与 C++ 触发 `NonIdempotentRequestHandler` 的方法相同）计入写计数。
+    pub(super) fn count_write(&self, method: Method) {
+        if matches!(
+            method,
+            Method::Create | Method::Update | Method::Delete | Method::Call
+        ) {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// 登记并写出一帧。`_writer` 是写锁内的租约表，借用它证明调用方持有写锁。
     pub(super) fn write(
         &self,
@@ -175,6 +189,8 @@ impl Shared {
             return Err(Error::Disconnected(self.link.disconnected()));
         }
         let reply = lock(&self.dispatch).core.register(request);
+        // 在写锁内计数，见 `Handle::write_count`。
+        self.count_write(request.method);
         if let Err(error) = (&self.link.socket).write_all(frame) {
             self.teardown(DisconnectReason::Write(error));
             return Err(Error::Disconnected(self.link.disconnected()));
@@ -245,6 +261,15 @@ impl Handle {
     /// 服务端地址。
     pub fn addr(&self) -> SocketAddr {
         self.shared.addr
+    }
+
+    /// 至今经这条连接发出的 `create`、`update`、`delete`、`call` 数（含文件传输），供资源层判断缓存是否过期，取代
+    /// C++ 的 `SetNonIdempotentRequestHandler`（回调捕获裸指针、只有一个槽位，重写方案 §5.4 第 38 条）。
+    ///
+    /// 主连接的请求在写锁内计数：先读计数、再发出读请求，若读到的计数之后又有变更请求，下一次比较就会发现；
+    /// 计数没变时，所有已计数的变更都排在这次读取之前，服务端按顺序执行。文件传输在另一条连接上，完成后才计数。
+    pub(crate) fn write_count(&self) -> u64 {
+        self.shared.writes.load(Ordering::Relaxed)
     }
 
     /// 连接是否仍然可用；拆连接之后为 `false`，对应 C++ 的 `IsConnected`。

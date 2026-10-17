@@ -17,7 +17,9 @@
 //!   文件传输连接（[`Handle::transfer`](crate::control::Handle::transfer)），GDP 连接
 //!   （[`GdpClient`](crate::gdp::GdpClient)）与发现（[`discover`](crate::discovery::discover)）；
 //! - 门面：[`System`](crate::System) 对应 C++ 的 `GoSystem`，只包装它已有的几个便捷操作。其余资源与官方示例一样
-//!   经原始动词与 `Value` 访问，不建类型化模型：资源由服务端在运行时定义，字段随版本变化。
+//!   经原始动词与 `Value` 访问，不建类型化模型：资源由服务端在运行时定义，字段随版本变化；
+//! - 资源层：[`Resource`](crate::resource::Resource) 对应 C++ 的 `GoResource`，在原始动词之上缓存读结果、按 schema
+//!   校验写入、沿 HAL 链接取子资源，`ResourceApi` 示例经它访问资源。
 //!
 //! 前两层在同一个 crate 的同一个模块里（例如 GDP 的解码与 GDP 连接），以文件区分。
 //!
@@ -45,6 +47,12 @@
 //!   [`Handle`](crate::control::Handle) 是 owned 句柄（`Arc`），可以移到别的线程、存进别的对象，但不让连接存活：
 //!   `Client` Drop 之后经它发出的请求立即以 `Disconnected(Closed)` 失败。
 //! - [`System`](crate::System) 唯一拥有一个 `Client`，Drop 即断开；它的方法只借用这个连接。
+//! - [`Resource`](crate::resource::Resource) 由调用方唯一拥有：持有一个 `Handle`（不让连接存活）、自己的数据与 schema
+//!   缓存和可选的 `Subscription`，方法取 `&mut self`。没有 C++ 的 `GoResourceManager` 注册表，同一路径的两个
+//!   `Resource` 各有各的缓存，`children` 等得到的子资源同样是独立的值。缓存在访问时判断是否过期，不需要线程或回调：
+//!   连接的写计数变了（`create` / `update` / `delete` / `call` 在写锁内加一，文件传输在完成后加一；资源记下读取之前的
+//!   计数）、连接已断开，或订阅队列中有通知（订阅 `<路径>/*`）。C++ 用回调把管理器中的资源标脏，回调捕获裸 `this`、
+//!   写钩子只有一个槽位（重写方案 §5.4 第 38 条）。
 //! - [`Transaction`](crate::control::Transaction) 拥有一个已写出请求的应答接收端，丢弃即 fire-and-forget。
 //! - [`Subscription`](crate::control::Subscription) 拥有自己的通知队列与一份租约；读线程只持队列的 `Weak`。
 //!   同一表达式的租约计数归零（最后一个订阅 Drop）时写出 `unSub`，不等应答。
@@ -98,8 +106,9 @@
 //!   应答之后的孤立响应不是错误，忽略；
 //! - [`Error`](crate::Error)：连接层与门面的错误。`Connect`（建立连接失败）、`Timeout`（应答未到，槽位成为墓碑，
 //!   连接照常可用）、`Disconnected`（携带上面的原因，只能重连）、`Request`（`status` 不是 OK，携带完整响应；`status`
-//!   为 OK 时 `payload.errors` 不升级为错误，与 SDK 一致）、`Payload`（`System` 要读取的字段缺失或类型不对）、
-//!   `InvalidArgument`（尚未写出任何字节）；
+//!   为 OK 时 `payload.errors` 不升级为错误，与 SDK 一致）、`Payload`（`System`、`Resource::get` 或
+//!   `create_child` 要读取的字段缺失或类型不对）、`InvalidArgument`（尚未写出任何字节）、`Validation`（资源开启了
+//!   校验，补丁中的值不符合 schema，请求没有发出）；
 //! - [`gdp::RecvError`](crate::gdp::RecvError)：`Timeout` 没有收到消息，`Incomplete` 数据集未结束（已收到的保留），
 //!   `Disconnected`。信封或 CAS 坏掉的 GDP 消息由读线程丢弃，不报错；
 //! - [`discover`](crate::discovery::discover) 只在绑定发现端口或枚举网卡失败时返回 `io::Error`；单个网卡发送失败、

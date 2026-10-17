@@ -1,13 +1,15 @@
 //! 一台 GoPxL 设备的门面 [`System`]，对应 C++ 的 `GoSystem`：拥有主连接，把 `GoSystem` 的几个便捷操作包装成方法。
 //!
-//! 只包装 `GoSystem` 已有的操作；作业、回放、工具、GDP 输出等其余资源经 [`System::client`] 的原始动词访问，与
-//! 官方示例相同。资源由服务端在运行时定义，各版本的字段也会变化，类型化模型只会落后于服务端。
+//! 只包装 `GoSystem` 已有的操作；作业、回放、工具、GDP 输出等其余资源经 [`System::client`] 的原始动词访问（与
+//! 官方示例相同），或经 [`System::resource`] 的缓存资源访问（与 `ResourceApi` 示例相同）。资源由服务端在运行时
+//! 定义，各版本的字段也会变化，类型化模型只会落后于服务端。
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::control::Client;
 use crate::error::{Error, Result};
+use crate::resource::Resource;
 use crate::value::{Map, Value};
 
 /// `GoSystem` 各操作的超时（C++ 的 `*_TIMEOUT_MSEC` 都是 15 s）。
@@ -46,6 +48,14 @@ impl System {
     /// 主连接，对应 C++ 的 `Client`。大多数操作直接经它发出。
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// 路径 `path` 上带缓存的资源（见 [`Resource`]），开启写入前的校验，对应 C++ 的 `Resource`（`GoSystem` 的资源
+    /// 管理器默认开启校验）。每次调用得到一个独立的 `Resource`，各有各的缓存。
+    pub fn resource(&self, path: impl Into<String>) -> Resource {
+        let mut resource = Resource::new(self.client.handle(), path);
+        resource.set_validation(true);
+        resource
     }
 
     /// 启动设备：`call /system/commands/start`。
@@ -127,7 +137,10 @@ impl System {
         get: impl FnOnce(&Value) -> Option<T>,
     ) -> Result<T> {
         let response = self.client.read(path).timeout(TIMEOUT).response()?;
-        get(&response.payload[field]).ok_or(Error::Payload { path, field })
+        get(&response.payload[field]).ok_or_else(|| Error::Payload {
+            path: path.to_owned(),
+            field: field.to_owned(),
+        })
     }
 
     /// 集合 `path` 的子资源路径：`_embedded.item` 各条目的 `_links.self.href`。服务端强制 `item` 为数组；不是数组

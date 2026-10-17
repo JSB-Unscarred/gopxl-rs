@@ -21,9 +21,8 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 
 ## 示例
 
-`examples/` 是官方 C++ 示例的移植（`ResourceApi` 随资源层移植），请求、顺序与超时与 C++ 相同；移植时修掉的
-示例缺陷写在各示例的文档开头。设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），默认
-`192.168.1.10:3600`：
+`examples/` 是官方 C++ 示例的移植，请求、顺序与超时与 C++ 相同；移植时修掉的示例缺陷写在各示例的文档开头。
+设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），默认 `192.168.1.10:3600`：
 
 ```bash
 GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
@@ -38,6 +37,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `ReceiveImage`、`Receive2dImage`、`Acquire2dImage` | `receive_image`、`receive_2d_image`、`acquire_2d_image` |
 | `ReceiveMetrics` | `receive_metrics` |
 | `SaveJob`、`BackupRestore`、`ReplayData`、`SystemUpgrade` | `save_job`、`backup_restore`、`replay_data`、`system_upgrade` |
+| `ResourceCommands`、`ResourceConfigureSensor`、`ResourceConfigureTool`、`ResourceSchema`、`ResourceSubscriptions`（`ResourceApi`） | `resource_commands`、`resource_configure_sensor`、`resource_configure_tool`、`resource_schema`、`resource_subscriptions` |
 
 ## 已实现的接口
 
@@ -104,6 +104,40 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \` 与 NUL（服务端在 NUL 处截断表达式），生成的正则无法编译时同样报错 |
 | `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | 路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`）；路径与 `Value::pointer` 同一语法（`/` 是键 `""`，C++ 把它当作根）；`type` 为可空数组时同样导航 |
 | `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计；`type: "null"` 只接受 `Nil`（C++ 不认识它，一律通过） |
+| `GoSystem::Resource` | `System::resource(impl Into<String>) -> resource::Resource` | 开启写入前的校验（与 `GoSystem` 的资源管理器相同）；每次调用得到一个独立的 `Resource`，各有各的缓存 |
+| `GoResource::GoResource(client, uri)` | `Resource::new(Handle, impl Into<String>) -> Resource` | 不发请求；超时 5 s、展开层级 0、不校验 |
+| `GoResource` 的拷贝构造与赋值 | 不提供 | 缓存与订阅只有一个 owner；需要第二个时 `Resource::new(r.handle().clone(), r.path())` |
+| `GoResource::Uri` | `Resource::path() -> &str` |  |
+| `GoResource::SetTimeout`、`Timeout` | `Resource::set_timeout(Duration)`、`timeout()` | 默认 5 s |
+| `GoResource::SetExpandLevel`、`ExpandLevel` | `Resource::set_expand_level(i32)`、`expand_level()` | 设置时数据缓存失效，缓存总是按当前层级读到的 |
+| `GoResource::Data` | `Resource::data() -> Result<&Value>` | 缓存为空或过期时读服务端，读参数 `{expandLevel, includeSchema: false}`；同一连接上发出任一 `create` / `update` / `delete` / `call`（含文件传输）之后、订阅收到通知之后或连接断开之后，缓存过期（取代 C++ 的 `SetNonIdempotentRequestHandler` 与 `ResetConnectionState`）；C++ 的 `Cache`（总是重读）即 `invalidate()` 之后 `data()` |
+| `GoResource::GetBool`、`GetInt`、`GetInt64`、`GetFloat`、`GetDouble`、`GetString`、`GetObject`、`GetProp` | `Resource::get(&str, impl FnOnce(&Value) -> Option<T>) -> Result<T>`，例如 `get(ptr, Value::as_i64)`、`get(ptr, Some)` | 字段缺失或类型不对时为 `Error::Payload`（C++ 抛 `GoResourceError`）；整数不截断浮点数 |
+| `GoResource::InvalidateCache` | `Resource::invalidate()` | 丢弃数据与 schema 缓存 |
+| `GoResource::HasRemoteChanges` | `Resource::has_remote_changes() -> bool` | 下一次 `data` 是否读服务端；从未读取时也为 `true` |
+| `GoResource::SetBool`、`SetInt`、`SetInt64`、`SetFloat`、`SetDouble`、`SetString`、`SetProp` | `Resource::set(&str, impl Into<Value>) -> Result<()>` | 只含这一个值的 `update`，立即发送 |
+| `GoResource::SetJson`、`Update(payload)`；`ScopedUpdate`、`BeginUpdate`、`EndUpdate`、`Flush`、`GoUpdateScope` | `Resource::update(impl Into<Value>) -> Result<()>` | 多个修改用 `Value::set` 写进同一个补丁，一次发送；开启校验时补丁中对象以外的每个值按所在位置校验（与 `Set*` 相同；C++ 的 `SetJson` 不校验），判为不合格时先重读一次 schema（schema 随设备状态变化，C++ 只用缓存的 schema） |
+| `GoResource::CancelUpdate`、`IsUpdateCancelled`、`IsUpdateDeferred`、`DiscardPending`；`GoUpdateScope::Cancel` | 不提供 | 补丁在调用方手里，不发送即取消；没有共享的待发补丁（C++ 的 `Flush` 失败时丢失补丁，作用域的异常路径清掉外层作用域的改动） |
+| `GoResource::Schema` | `Resource::schema() -> Result<&Value>` | 读参数 `{includeSchema: true}`，只更新 schema 缓存（C++ 用不展开的数据覆盖已展开的数据缓存）；没有 `_schema` 时为 `Nil` |
+| `GoResource::SchemaFor` | `schema::schema_for_path(resource.schema()?, &str)` | 不在 schema 中时为 `None`（C++ 抛 `GoResourceError`） |
+| `GoResource::Validate` | `Resource::validate(&str, &Value) -> Result<Vec<Issue>>` | 空表即通过；不在 schema 中的位置不约束 |
+| `GoResource::EnableValidation`、`IsValidationEnabled` | `Resource::set_validation(bool)`、`validation_enabled()` | `System::resource` 得到的资源默认开启 |
+| `GoResource::Subscribe`、`Unsubscribe`、`IsSubscribed` | `Resource::subscribe() -> Result<()>`、`unsubscribe()`、`is_subscribed()` | 订阅 `<路径>/*`，收得到子项的 `created` / `deleted`（C++ 订阅精确路径）；订阅时数据缓存失效；`extId=` 路径与不规范的路径（不以 `/` 开头、有空段）收不到通知（通知带规范路径）；取消订阅时先取空队列；取消订阅与 Drop 不等 `unSub` 的应答（C++ 的析构最多阻塞 5 s） |
+| `GoResource::Links`、`Embedded`、`CallArguments` | `data()?["_links"]`、`data()?["_embedded"]`、`data()?.pointer("/parameters")` |  |
+| `GoResource::ChildUris`、`ChildCount` | `Resource::child_paths(&str) -> Result<Vec<String>>` 及其长度 | rel 名见 `resource::rel`；rel 为单个对象时也读出（C++ 返回空） |
+| `GoResource::Children` | `Resource::children(&str) -> Result<Vec<Resource>>` | 子资源继承超时与校验设置；展开层级不为 0 时条目放进子资源的缓存，子资源的展开层级取下一层（C++ 按键数猜测是否已展开，把带 `ordIndex` 的链接当作数据） |
+| `GoResource::Child` | `Resource::child(&str) -> Resource` | 不发请求；继承超时与校验设置 |
+| `GoResource::CreateChild` | `Resource::create_child(impl Into<Value>) -> Result<Resource>` | 新路径取响应的 `path`，没有时取 `_links.self.href`，都没有时为 `Error::Payload` |
+| `GoResource::Delete`、`DeleteChild` | `Resource::delete(self) -> Result<()>` | 消耗资源；`notFound` 也算成功；子项用 `children` 得到的资源，或对 `child_paths` 的绝对路径 `Resource::new` 后删除 |
+| `GoResource::DeleteAllChildren` | 对 `children(rel)?` 逐个 `delete()` |  |
+| `GoResource::Call`、`CallCommand`、`CallAction` | `Resource::call(impl Into<Value>)`、`command(&str, impl Into<Value>)`、`action(&str, impl Into<Value>)`，均返回 `Transaction` | 超时为资源的超时，`Transaction::timeout` 可改；`notFound` 不把资源标记为已删除（C++ 的命令与动作失败时标记父资源） |
+| `GoResource::CommandNames`、`ActionNames` | `Resource::command_names()`、`action_names() -> Result<Vec<String>>` | 动作同时读 `go:action` 与 `go:actions`（手册中传感器的例子用复数） |
+| `GoResource::Read`、`Read(args)`、`Update(payload, args)` | `Resource::handle()` 的 `send(Request)` | 带任意参数的请求不进缓存 |
+| `GoResource::IsDeleted`、`IsManaged`；`SetAutoFetchSchema`、`AutoFetchSchema`、`SetAutoInvalidation`、`AutoInvalidation` | 不提供 | 删除之后资源已被消耗，别处删除时下一次读取返回 `notFound`；没有管理器；schema 单独读取并缓存；自身的写入总是使缓存过期（C++ 关闭 `AutoInvalidation` 只对已订阅的资源有效，使它返回旧数据） |
+| `GoResourceManager::GetOrCreate`、`SetAutoValidation`、`AutoValidation` | `System::resource`（开启校验）、`Resource::new`（不校验） | 没有身份映射：写计数与订阅让各自的缓存一起过期 |
+| `GoResourceManager::SetAutoSubscribe`、`SubscribeAll`、`UnsubscribeAll`、`EnableValidationAll`、`DisableValidationAll`、`InvalidateAll`、`Remove`、`Cleanup`；`GoSystem::ResourceManager` | 不提供 | 资源由调用方拥有，没有中心注册表：对自己持有的资源逐个调用 `subscribe`、`set_validation`、`invalidate`，不再需要时 drop |
+| `GoResourceManager::ResetConnectionState` | 不提供 | 连接断开后缓存自动过期；不重连，重建 `System` 与资源 |
+| `GoResourceManager::SetSubscriptionOptimizedInvalidation`、`SubscriptionOptimizedInvalidation` | 不提供 | 已订阅的资源同样按写计数过期（相当于 C++ 关闭这个优化），订阅只用于发现其他客户端与设备自身的修改，写入之后不会读到通知到达之前的旧数据 |
+| `GoResourceManager::Client` | `Resource::handle() -> &Handle` |  |
 | `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT` | 3600、3601 |
 | `GoGdpMsg::Deserialize`；`GoGdpClient` 的消息分派 | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | 每条消息都解析 CAS（C++ 跳过未知类型，丢掉 isLastMsg）；CAS 之后坏掉时为 `Body::Invalid` |
 | — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | 控制通道 `/dataSources` 流的 bin |
@@ -149,7 +183,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
 | `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
-| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError`） |
+| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`Validation`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System`、`Resource::get` 或 `create_child` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）；`Validation` 见 `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`：`Ready`、`Running`、`Conflict`、`Other(i64)` | 0、1、2 与表外的值 |
 | `GoTransaction` | `control::Transaction` |  |
 | 应答通道（C++ 的 `GoTransaction` 内部状态） | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | 由 `register` 建立的 `sync_channel(1)`，读线程持锁发送时从不阻塞；丢弃即墓碑 |
@@ -161,6 +195,11 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | 服务端的 `SubscriptionExpression` | `control::SubscriptionExpr`、`control::SubExprError` | 两个正则（R、E）逐字移植后由 regex-lite 编译 |
 | `_schema`（基于 JSON Schema Draft 2019-09 的方言） | `Value` | 注解（`unit`、`visibility`、`extendedType` …）直接读取 |
 | `GoResourceValidationError::Errors()` | `schema::Issue` | 每个关键字一个变体 |
+| `GoRelationType` | `resource::rel`：`ITEM`、`SCANNER`、`SUB_TASK`、`CONTENT`、`COMMAND`、`ACTION` | `GoResource::DEFAULT_RELATION_TYPE` 即 `ITEM`；Rust 的方法显式传入 rel |
+| `GoResource::DEFAULT_TIMEOUT_MS`、`DEFAULT_EXPAND_LEVEL` | `Resource::new` 的默认值：5 s、0 |  |
+| `GoResourceError` | `Error::Payload`（`get` 的字段缺失或类型不对，`create_child` 的响应中找不到新路径） | C++ 的其余抛出点（资源已删除、缺少管理器、`EndUpdate` 不配对）在 Rust 中不存在 |
+| `GoResourceValidationError` | `Error::Validation { path, pointer, issues }` | `Errors()` 即 `issues`，`pointer` 是补丁中不合格的值的位置 |
+| HAL 的 rel（数组、单个对象、`[]`、nil 或缺失） | `Resource::child_paths`、`children`、`command_names`、`action_names` 按条目列表读取 | 服务端只有一个引用时写出单个对象 |
 | `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)` |
 | `CommonAttributes` | `gdp::Cas` |  |
 | `GoGdpTransform`、`GoGdpBoundingBox` | `Option<[f32; 12]>`、`Option<[f32; 6]>` | 线上顺序，保留 `f32` |

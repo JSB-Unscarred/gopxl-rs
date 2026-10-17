@@ -1,5 +1,5 @@
 //! 连接层与门面的错误类型 [`Error`]。变体按调用方能做什么划分：重试或重连（`Connect`、`Timeout`、
-//! `Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`）。
+//! `Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`、`Validation`）。
 
 use std::fmt;
 use std::io;
@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::control::{DisconnectReason, Method, Response};
+use crate::schema::Issue;
 
 /// 本 crate 连接层的 `Result`。
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -41,13 +42,24 @@ pub enum Error {
     /// 服务端的 `status` 不是 OK。
     #[error(transparent)]
     Request(Box<RequestError>),
-    /// 响应成功，但载荷缺少 [`System`](crate::System) 的方法要读取的字段，或字段类型不对（C++ 抛 `GoJsonError`）。
+    /// 响应成功，但载荷缺少要读取的字段，或字段类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）。
     #[error("{path}: response payload has no valid {field:?}")]
     Payload {
-        /// 读取的路径。
-        path: &'static str,
-        /// 载荷中的字段名。
-        field: &'static str,
+        /// 请求的路径。
+        path: String,
+        /// 载荷中的字段名或 JSON Pointer。
+        field: String,
+    },
+    /// 资源开启了校验（[`Resource::set_validation`](crate::resource::Resource::set_validation)），补丁中 `pointer` 处的值不符合
+    /// schema，请求没有发出，对应 C++ 的 `GoResourceValidationError`。
+    #[error("{path}: {pointer:?} fails schema validation: {}", list(issues))]
+    Validation {
+        /// 资源路径。
+        path: String,
+        /// 补丁中不合格的值的 JSON Pointer。
+        pointer: String,
+        /// 发现的问题，非空。
+        issues: Vec<Issue>,
     },
     /// 参数无法发送：端口为 0、帧超过 4 GiB、主连接上的 `stream` / `cancelStream`、无法匹配的订阅表达式。
     #[error("invalid argument: {0}")]
@@ -95,4 +107,10 @@ pub(crate) fn check(method: Method, path: String, response: Response) -> Result<
             response,
         })))
     }
+}
+
+/// `Validation` 的 `Display`：各问题以 `; ` 分隔。
+fn list(issues: &[Issue]) -> String {
+    let issues: Vec<_> = issues.iter().map(Issue::to_string).collect();
+    issues.join("; ")
 }

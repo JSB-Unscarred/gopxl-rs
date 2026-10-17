@@ -8,15 +8,8 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use common::{SCANNER_PATH, SENSOR_PATH};
+use common::{ALIGNED, ALIGNING, SCANNER_PATH, SENSOR_PATH, UNALIGNED};
 use gopxl::value::Value;
-
-/// 对准状态：未对准。
-const UNALIGNED: i64 = 0;
-/// 对准状态：已对准。
-const ALIGNED: i64 = 1;
-/// 对准状态：对准中。
-const ALIGNING: i64 = 2;
 
 fn main() -> common::Result {
     let system = common::connect()?;

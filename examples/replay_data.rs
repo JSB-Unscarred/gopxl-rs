@@ -20,7 +20,6 @@ const REPLAY_SEEK_PATH: &str = "/replay/commands/seek";
 const RECORDING_PATH: &str = "/replay/recording";
 const RECORDING_FILE: &str = "sample_recording.gprec";
 
-const TRIGGER_SOURCE_PATH: &str = "/parameters/triggerSettings/source";
 const FRAMERATE_PATH: &str = "/parameters/triggerSettings/frameRate";
 const MAX_FRAMERATE_PATH: &str = "/parameters/triggerSettings/maxFrameRateEnabled";
 const FRAMERATE: i64 = 10;
@@ -37,7 +36,7 @@ fn main() -> common::Result {
 
     println!("Setting frame rate to {FRAMERATE}...");
     let mut params = Value::object();
-    params.set(TRIGGER_SOURCE_PATH, common::TRIGGER_MODE_TIME)?;
+    params.set(common::TRIGGER_SOURCE_PATH, common::TRIGGER_MODE_TIME)?;
     params.set(MAX_FRAMERATE_PATH, false)?;
     // 先关闭 maxFrameRateEnabled 再设帧率：开启时有的扫描引擎把 frameRate 设为只读。
     client

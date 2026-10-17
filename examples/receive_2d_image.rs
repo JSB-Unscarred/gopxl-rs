@@ -55,10 +55,7 @@ fn main() -> common::Result {
         .response()?;
 
     let mut trigger = Value::object();
-    trigger.set(
-        "/parameters/triggerSettings/source",
-        common::TRIGGER_MODE_TIME,
-    )?;
+    trigger.set(common::TRIGGER_SOURCE_PATH, common::TRIGGER_MODE_TIME)?;
     client.update(common::SENSOR_2D_PATH, trigger).response()?;
 
     let mut exposure = Value::object();

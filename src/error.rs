@@ -1,5 +1,5 @@
-//! 连接层的错误类型 [`Error`]。变体按调用方能做什么划分：重试或重连（`Connect`、`Timeout`、`Disconnected`），
-//! 查看服务端的回复（`Request`），修正参数（`InvalidArgument`）。
+//! 连接层与门面的错误类型 [`Error`]。变体按调用方能做什么划分：重试或重连（`Connect`、`Timeout`、
+//! `Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`）。
 
 use std::fmt;
 use std::io;
@@ -41,6 +41,14 @@ pub enum Error {
     /// 服务端的 `status` 不是 OK。
     #[error(transparent)]
     Request(Box<RequestError>),
+    /// 响应成功，但载荷缺少 [`System`](crate::System) 的方法要读取的字段，或字段类型不对（C++ 抛 `GoJsonError`）。
+    #[error("{path}: response payload has no valid {field:?}")]
+    Payload {
+        /// 读取的路径。
+        path: &'static str,
+        /// 载荷中的字段名。
+        field: &'static str,
+    },
     /// 参数无法发送：端口为 0、帧超过 4 GiB、主连接上的 `stream` / `cancelStream`、无法匹配的订阅表达式。
     #[error("invalid argument: {0}")]
     InvalidArgument(String),

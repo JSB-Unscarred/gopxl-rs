@@ -19,6 +19,26 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 - 目标平台与 C++ SDK 相同：`x86_64-pc-windows-msvc`、`x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、
   `armv7-unknown-linux-gnueabihf`；目前只在 `x86_64-pc-windows-msvc` 上构建验证。
 
+## 示例
+
+`examples/` 是官方 C++ 示例的移植（`ResourceApi` 随资源层移植），请求、顺序与超时与 C++ 相同；移植时修掉的
+示例缺陷写在各示例的文档开头。设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），默认
+`192.168.1.10:3600`：
+
+```bash
+GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
+```
+
+| C++ 示例 | Rust 示例 |
+| --- | --- |
+| `Discover` | `discover` |
+| `ConfigureSensor`、`ConfigureTool`、`AlignSensor`、`MultiSensorLayout` | `configure_sensor`、`configure_tool`、`align_sensor`、`multi_sensor_layout` |
+| `ReceiveMeasurement`、`ReceiveString`、`ReceiveAsync` | `receive_measurement`、`receive_string`、`receive_async` |
+| `ReceiveProfile`、`ReceiveSurface`、`MultilayerOutputs` | `receive_profile`、`receive_surface`、`multilayer_outputs` |
+| `ReceiveImage`、`Receive2dImage`、`Acquire2dImage` | `receive_image`、`receive_2d_image`、`acquire_2d_image` |
+| `ReceiveMetrics` | `receive_metrics` |
+| `SaveJob`、`BackupRestore`、`ReplayData`、`SystemUpgrade` | `save_job`、`backup_restore`、`replay_data`、`system_upgrade` |
+
 ## 已实现的接口
 
 以官方 C++ SDK（8.5.62.52）的公共头文件为准；.NET 的同名接口归入同一行，行为差异写在说明列，.NET 独有的接口单独
@@ -64,7 +84,17 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Handle::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(Duration) -> Result<Option<StreamMessage>>`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
 | `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | `Handle::on_disconnect(impl FnOnce(&DisconnectReason))` | 连接丢失时在一个新线程上调用一次并给出原因，回调里可以发请求、重连；`Client` 的 drop 不触发；已断开时立即调用；只在真正拆连接时触发（C++ 一个坏消息就触发） |
 | — | `Handle::transfer(Request, Duration) -> Result<Response>` | 文件传输（归档、恢复、升级、作业与回放数据）用的临时连接，不阻塞主连接；超时是连续没有收到字节的时长；下载的 `Bin` 引用响应帧 |
+| `GoSystem::GoSystem(address, port)`、`SetAddress`、`SetControlPort`、`Connect` | `System::connect(SocketAddr) -> Result<System>` | 存在即已连接，没有“未连接”的状态；端口 0 报 `InvalidArgument` |
+| `GoSystem::Disconnect`、`~GoSystem` | `drop(system)` | 同 `GoRestClient::Disconnect` |
+| `GoSystem::Client` | `System::client() -> &Client` | `IsConnected`、`SetDisconnectHandler` 经它调用 `is_connected`、`on_disconnect` |
 | `GoSystem::Address`、`ControlPort` | `Handle::addr() -> SocketAddr` |  |
+| `GoSystem::Start`、`Stop` | `System::start()`、`stop() -> Result<()>` | `call /system/commands/start` / `stop`，超时 15 s |
+| `GoSystem::RunningState` | `System::running_state() -> Result<RunState>` | 读 `/system` 的 `runState`，超时 15 s；表外的值为 `RunState::Other`（C++ 直接强制转换） |
+| `GoSystem::EnableQuickEdit`、`DisableQuickEdit`、`QuickEditEnabled` | `System::set_quick_edit(bool) -> Result<()>`、`quick_edit_enabled() -> Result<bool>` | `update` / `read /system` 的 `quickEditEnabled`，超时 15 s |
+| `GoSystem::GdpPort` | `System::gdp_port() -> Result<u16>` | 读 `/controls/gocator` 的 `serverPort`，超时 15 s；不在 `u16` 内时报 `Error::Payload`（C++ 截断） |
+| `GoSystem::SensorPath` | `System::sensor_path(&str) -> Result<Option<String>>` | 与 C++ 一样逐层读取引擎、扫描器、传感器并比较字符串 `serialNumber`；找不到时为 `None`（C++ 返回 `""`） |
+| `ApiVersion`、`ReleaseVersion` | `API_VERSION`（`"9.0.0"`）、`RELEASE_VERSION`（`"1.5"`） |  |
+| `BuildVersion`、`BuildVersionNumber` | 不提供 | crate 版本由 Cargo 给出 |
 | `GoGdpClient::Connect`、`Close` | `gdp::GdpClient::connect(SocketAddr) -> Result<GdpClient>`；drop | 超时 5 s；读线程逐条解码；从不写 socket |
 | `GoGdpClient::ReceiveDataSync`、`DataSet`、`ReceiveDataAsync` | `GdpClient::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | 按 `cas.is_last_msg` 组集；单一截止时间（C++ 读到一半时不限时）；区分 `Timeout` 与 `Incomplete`，已收到的消息保留到下一次；异步接收即在自己的线程里循环；本地只缓冲 4 条，不读时背压到服务端（C++ 的异步队列无界）；信封或 CAS 坏掉的消息丢弃 |
 | `GoGdpClient::ClearData` | `GdpClient::clear_data(&mut self) -> Result<()>` | 重连，丢弃积压的数据与未完成的数据集 |
@@ -119,7 +149,8 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
 | `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
-| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致） |
+| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError`） |
+| `GoSystem::State` | `RunState`：`Ready`、`Running`、`Conflict`、`Other(i64)` | 0、1、2 与表外的值 |
 | `GoTransaction` | `control::Transaction` |  |
 | 应答通道（C++ 的 `GoTransaction` 内部状态） | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | 由 `register` 建立的 `sync_channel(1)`，读线程持锁发送时从不阻塞；丢弃即墓碑 |
 | `GoNotificationHandler`、`NotificationCallback` 收到的通知 | `control::Notice`：`Event(Arc<Notification>)`、`Lagged(u64)` | 一条通知投递给多个订阅时共享；`Lagged` 是在此之前丢掉的条数 |

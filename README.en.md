@@ -21,6 +21,26 @@ libraries.
   `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`; currently built and verified only on
   `x86_64-pc-windows-msvc`.
 
+## Examples
+
+`examples/` ports the official C++ samples (`ResourceApi` comes with the resource layer) with the same requests,
+order and timeouts; sample defects fixed while porting are listed at the top of each example. The device address
+comes from the `GOPXL_IP` environment variable (`IP` or `IP:port`), `192.168.1.10:3600` by default:
+
+```bash
+GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
+```
+
+| C++ sample | Rust example |
+| --- | --- |
+| `Discover` | `discover` |
+| `ConfigureSensor`, `ConfigureTool`, `AlignSensor`, `MultiSensorLayout` | `configure_sensor`, `configure_tool`, `align_sensor`, `multi_sensor_layout` |
+| `ReceiveMeasurement`, `ReceiveString`, `ReceiveAsync` | `receive_measurement`, `receive_string`, `receive_async` |
+| `ReceiveProfile`, `ReceiveSurface`, `MultilayerOutputs` | `receive_profile`, `receive_surface`, `multilayer_outputs` |
+| `ReceiveImage`, `Receive2dImage`, `Acquire2dImage` | `receive_image`, `receive_2d_image`, `acquire_2d_image` |
+| `ReceiveMetrics` | `receive_metrics` |
+| `SaveJob`, `BackupRestore`, `ReplayData`, `SystemUpgrade` | `save_job`, `backup_restore`, `replay_data`, `system_upgrade` |
+
 ## Implemented interfaces
 
 Based on the public headers of the official C++ SDK (8.5.62.52); a same-named .NET interface shares the row, with
@@ -67,7 +87,17 @@ implemented.
 | `GoRestClient::StartStream`, `StopStream`, `SetStreamHandler` | `Handle::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`; `StreamHandle::recv_timeout(Duration) -> Result<Option<StreamMessage>>`; dropping it stops the stream | One connection per stream; waits 5 s for the reply, a `status` other than OK is `Error::Request`; data that arrives before the reply comes first; end messages (`Complete` / `Abort`) are yielded like any other; spurious responses after the reply are ignored (C++ takes them as the next request's reply); closing the connection stops the stream, `cancelStream` is never sent; 4 messages are buffered locally, a slow consumer pushes back on the server |
 | `GoRestClient::SetDisconnectHandler`, `SetReadErrorHandler` | `Handle::on_disconnect(impl FnOnce(&DisconnectReason))` | Called once with the reason on a new thread when the connection is lost, so the callback may send requests or reconnect; dropping the `Client` does not fire it; called immediately if already disconnected; only fires on a real teardown (C++ fires on a single bad message) |
 | — | `Handle::transfer(Request, Duration) -> Result<Response>` | A temporary connection for file transfers (archive, restore, upgrade, job and replay data) that does not block the main connection; the timeout bounds the time without any received byte; a downloaded `Bin` refers to the response frame |
+| `GoSystem::GoSystem(address, port)`, `SetAddress`, `SetControlPort`, `Connect` | `System::connect(SocketAddr) -> Result<System>` | Connected as long as it exists, there is no "not connected" state; port 0 is `InvalidArgument` |
+| `GoSystem::Disconnect`, `~GoSystem` | `drop(system)` | Same as `GoRestClient::Disconnect` |
+| `GoSystem::Client` | `System::client() -> &Client` | `IsConnected` and `SetDisconnectHandler` go through it as `is_connected` and `on_disconnect` |
 | `GoSystem::Address`, `ControlPort` | `Handle::addr() -> SocketAddr` |  |
+| `GoSystem::Start`, `Stop` | `System::start()`, `stop() -> Result<()>` | `call /system/commands/start` / `stop`, 15 s timeout |
+| `GoSystem::RunningState` | `System::running_state() -> Result<RunState>` | Reads `runState` of `/system`, 15 s timeout; values outside the table are `RunState::Other` (C++ casts them to the enum) |
+| `GoSystem::EnableQuickEdit`, `DisableQuickEdit`, `QuickEditEnabled` | `System::set_quick_edit(bool) -> Result<()>`, `quick_edit_enabled() -> Result<bool>` | `update` / `read` of `quickEditEnabled` in `/system`, 15 s timeout |
+| `GoSystem::GdpPort` | `System::gdp_port() -> Result<u16>` | Reads `serverPort` of `/controls/gocator`, 15 s timeout; a value outside `u16` is `Error::Payload` (C++ truncates it) |
+| `GoSystem::SensorPath` | `System::sensor_path(&str) -> Result<Option<String>>` | Reads engines, scanners and sensors level by level like C++ and compares the string `serialNumber`; `None` when not found (C++ returns `""`) |
+| `ApiVersion`, `ReleaseVersion` | `API_VERSION` (`"9.0.0"`), `RELEASE_VERSION` (`"1.5"`) |  |
+| `BuildVersion`, `BuildVersionNumber` | Not provided | Cargo provides the crate version |
 | `GoGdpClient::Connect`, `Close` | `gdp::GdpClient::connect(SocketAddr) -> Result<GdpClient>`; drop | 5 s timeout; a reader thread decodes message by message; never writes to the socket |
 | `GoGdpClient::ReceiveDataSync`, `DataSet`, `ReceiveDataAsync` | `GdpClient::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | Groups messages into a set by `cas.is_last_msg`; one deadline (C++ has no limit once a message is half read); distinguishes `Timeout` from `Incomplete`, keeping received messages for the next call; async reception is a loop on your own thread; only 4 messages are buffered locally, so not reading pushes back on the server (the C++ async queue is unbounded); messages with a broken envelope or CAS are dropped |
 | `GoGdpClient::ClearData` | `GdpClient::clear_data(&mut self) -> Result<()>` | Reconnects, discarding backlogged data and the unfinished set |
@@ -122,7 +152,8 @@ Filled in as each layer is implemented.
 | `kStatus` | `control::Status(i32)` with every constant (including −975 `OVERHEAT`) | Values outside the table are kept as is |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`, `control::InboundError` |  |
 | Disconnects reported through `SetDisconnectHandler` (C++ gives no reason) | `control::DisconnectReason`: `Closed`, `Eof`, `Read`, `Write`, `Decode`, `Unsolicited`, `Desync` | Every pending request fails with the same `Arc` reason; stream and GDP connections report their disconnects with it too |
-| `GoChannelError`, `GoRequestError` (.NET `GoChannelException`, `GoRequestException`) | `Error`: `Connect`, `Timeout`, `Disconnected`, `Request(Box<RequestError>)`, `InvalidArgument`; `RequestError` carries the method, path and full `Response` | `Display` includes the description of the first `payload.errors` entry; with an OK `status`, `payload.errors` is not turned into an error (same as the SDK) |
+| `GoChannelError`, `GoRequestError` (.NET `GoChannelException`, `GoRequestException`) | `Error`: `Connect`, `Timeout`, `Disconnected`, `Request(Box<RequestError>)`, `Payload`, `InvalidArgument`; `RequestError` carries the method, path and full `Response` | `Display` includes the description of the first `payload.errors` entry; with an OK `status`, `payload.errors` is not turned into an error (same as the SDK); `Payload` means a field `System` reads is missing or has the wrong type (C++ throws `GoJsonError`) |
+| `GoSystem::State` | `RunState`: `Ready`, `Running`, `Conflict`, `Other(i64)` | 0, 1, 2 and values outside the table |
 | `GoTransaction` | `control::Transaction` |  |
 | Reply channel (internal state of a C++ `GoTransaction`) | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | A `sync_channel(1)` created by `register`, so the reader thread never blocks when it sends under the lock; dropping it makes a tombstone |
 | Notifications received by a `GoNotificationHandler` or `NotificationCallback` | `control::Notice`: `Event(Arc<Notification>)`, `Lagged(u64)` | A notification delivered to several subscriptions is shared; `Lagged` is the number dropped before this point |

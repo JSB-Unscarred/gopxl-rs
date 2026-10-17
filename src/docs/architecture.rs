@@ -15,9 +15,11 @@
 //! - 连接：每种连接类型读写自己的 socket，把字节交给编解码层，相当于 FFI 封装中“方法直接调用 `sys`”。
 //!   控制通道的主连接（[`Client`](crate::control::Client)）、流连接（[`StreamHandle`](crate::control::StreamHandle)）、
 //!   文件传输连接（[`Handle::transfer`](crate::control::Handle::transfer)），GDP 连接
-//!   （[`GdpClient`](crate::gdp::GdpClient)）与发现（[`discover`](crate::discovery::discover)）。
+//!   （[`GdpClient`](crate::gdp::GdpClient)）与发现（[`discover`](crate::discovery::discover)）；
+//! - 门面：[`System`](crate::System) 对应 C++ 的 `GoSystem`，只包装它已有的几个便捷操作。其余资源与官方示例一样
+//!   经原始动词与 `Value` 访问，不建类型化模型：资源由服务端在运行时定义，字段随版本变化。
 //!
-//! 两层在同一个 crate 的同一个模块里（例如 GDP 的解码与 GDP 连接），以文件区分。
+//! 前两层在同一个 crate 的同一个模块里（例如 GDP 的解码与 GDP 连接），以文件区分。
 //!
 //! ## 所有权
 //!
@@ -42,6 +44,7 @@
 //! - [`Client`](crate::control::Client) 是主连接的唯一 owner，不 `Clone`，Drop 即断开。
 //!   [`Handle`](crate::control::Handle) 是 owned 句柄（`Arc`），可以移到别的线程、存进别的对象，但不让连接存活：
 //!   `Client` Drop 之后经它发出的请求立即以 `Disconnected(Closed)` 失败。
+//! - [`System`](crate::System) 唯一拥有一个 `Client`，Drop 即断开；它的方法只借用这个连接。
 //! - [`Transaction`](crate::control::Transaction) 拥有一个已写出请求的应答接收端，丢弃即 fire-and-forget。
 //! - [`Subscription`](crate::control::Subscription) 拥有自己的通知队列与一份租约；读线程只持队列的 `Weak`。
 //!   同一表达式的租约计数归零（最后一个订阅 Drop）时写出 `unSub`，不等应答。
@@ -63,7 +66,7 @@
 //!
 //! 只提供阻塞 API，不依赖异步运行时：原 SDK 的宿主（Qt、MFC、PLC 网关、Python 扩展）直接调用阻塞接口。
 //! 超时：建立控制连接 1 s、GDP 连接 5 s；请求等待应答默认 3 s（[`Transaction::timeout`](crate::control::Transaction::timeout)
-//! 可改），从 `response()` 开始计；`sub` 与流的应答 5 s；写出 10 s，超时即拆连接。读不设超时（文件传输连接除外），
+//! 可改），从 `response()` 开始计；`sub` 与流的应答 5 s；`System` 的操作 15 s（同 C++）；写出 10 s，超时即拆连接。读不设超时（文件传输连接除外），
 //! 空闲连接上的断线由 TCP keepalive（30 s 后每 10 s 探测）发现。
 //!
 //! ## unsafe
@@ -93,9 +96,10 @@
 //!   半帧），`Decode` 是坏帧；`Unsolicited`（挂起队列为空时收到响应）与 `Desync`（响应的 `path` 与队首请求不同）
 //!   说明 FIFO 已经或可能错位，拆连接好过把响应交给错误的调用方。流连接与 GDP 连接的断开也用它表示；流连接上
 //!   应答之后的孤立响应不是错误，忽略；
-//! - [`Error`](crate::Error)：连接层的错误。`Connect`（建立连接失败）、`Timeout`（应答未到，槽位成为墓碑，连接
-//!   照常可用）、`Disconnected`（携带上面的原因，只能重连）、`Request`（`status` 不是 OK，携带完整响应；`status`
-//!   为 OK 时 `payload.errors` 不升级为错误，与 SDK 一致）、`InvalidArgument`（尚未写出任何字节）；
+//! - [`Error`](crate::Error)：连接层与门面的错误。`Connect`（建立连接失败）、`Timeout`（应答未到，槽位成为墓碑，
+//!   连接照常可用）、`Disconnected`（携带上面的原因，只能重连）、`Request`（`status` 不是 OK，携带完整响应；`status`
+//!   为 OK 时 `payload.errors` 不升级为错误，与 SDK 一致）、`Payload`（`System` 要读取的字段缺失或类型不对）、
+//!   `InvalidArgument`（尚未写出任何字节）；
 //! - [`gdp::RecvError`](crate::gdp::RecvError)：`Timeout` 没有收到消息，`Incomplete` 数据集未结束（已收到的保留），
 //!   `Disconnected`。信封或 CAS 坏掉的 GDP 消息由读线程丢弃，不报错；
 //! - [`discover`](crate::discovery::discover) 只在绑定发现端口或枚举网卡失败时返回 `io::Error`；单个网卡发送失败、

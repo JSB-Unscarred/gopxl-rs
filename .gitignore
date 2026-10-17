@@ -1,5 +1,11 @@
 /target/
 
+# 示例在当前目录写出的图像、备份、录制与作业文件
+/*.bmp
+/*.gpbak
+/*.gprec
+/*.gpjob
+
 /.claude/
 /.idea/
 /.vscode/

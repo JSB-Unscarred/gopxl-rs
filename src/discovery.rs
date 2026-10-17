@@ -12,8 +12,8 @@
 //! | 32 | — | 紧凑 JSON 对象，以 NUL 结尾，最长 1504 字节 |
 //!
 //! 数据报来自网络，[`parse_announce`] 用以下约定修掉 C++ SDK 的缺陷（重写方案 §5.4 第 28 条）：
-//! - 只解析收到的字节：先校验长度与 Length 字段，JSON 取到第一个 NUL 或数据报末尾，1537 字节的 Announce 在
-//!   1536 字节的缓冲区里丢掉 NUL 后，C++ 会越界读取；
+//! - 只解析收到的字节：JSON 取到第一个 NUL 或数据报末尾，1537 字节的 Announce 在 1536 字节的缓冲区里丢掉 NUL 后，
+//!   C++ 会越界读取；Length 字段与两个 SDK 一样不校验；
 //! - 读取都经过 `bytes::Buf` 的 `try_get_*`，下面的 lint 禁止下标与 unwrap，坏报文只得到 `Err`；
 //! - 字段缺失或类型不对时取默认值：C++ 在类型不对时抛异常，整条 Announce 被丢弃。
 
@@ -119,7 +119,7 @@ impl Instance {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DiscoveryError {
-    /// 长度、Length 字段、签名、`MsgId` 或状态不符，或 JSON 不是 UTF-8、顶层不是对象。
+    /// 数据报短于固定布局，签名、`MsgId` 或状态不符，或 JSON 不是 UTF-8、顶层不是对象。
     #[error("malformed discovery datagram")]
     Malformed,
     /// 客户端发出的命令（Discover / `SetIp`，经典协议的 `GetIP` / `GetInfo`），包括自己广播的回环。
@@ -156,7 +156,7 @@ fn put_u64s(out: &mut [u8], fields: &[u64]) {
 /// [`DiscoveryError::Command`]。
 pub fn parse_announce(datagram: &[u8]) -> Result<Instance, DiscoveryError> {
     let mut buf = datagram;
-    let length = buf.try_get_u64_le()?;
+    let _length = buf.try_get_u64_le()?;
     let msg_id = buf.try_get_u64_le()?;
     if buf.try_get_u64_le()? != SIGNATURE {
         return Err(DiscoveryError::Malformed);
@@ -167,9 +167,6 @@ pub fn parse_announce(datagram: &[u8]) -> Result<Instance, DiscoveryError> {
         _ => return Err(DiscoveryError::Malformed),
     }
     let status = buf.try_get_i64_le()?;
-    if usize::try_from(length) != Ok(datagram.len()) {
-        return Err(DiscoveryError::Malformed);
-    }
     let json = buf.split(|&b| b == 0).next().unwrap_or_default();
     let json: Value = std::str::from_utf8(json)
         .map_err(|_| DiscoveryError::Malformed)?

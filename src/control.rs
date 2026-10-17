@@ -10,15 +10,16 @@
 //! | 方向 | 帧头 | 消息体 |
 //! |---|---|---|
 //! | 客户端 → 服务端 | `u32 Length = 10 + N`、`u16 0xB000`、`u32 N` | N 字节 MessagePack |
-//! | 服务端 → 客户端 | `u32 Length = 14 + N`、`u16 0xB000`、`i32 CarrierStatus = 1`、`u32 N` | N 字节 MessagePack |
+//! | 服务端 → 客户端 | `u32 Length = 14 + N`、`u16 0xB000`、`i32 CarrierStatus`、`u32 N` | N 字节 MessagePack |
 //!
 //! 只用 0xB000（MessagePack）：服务端按请求的格式回复，通知与流消息跟随最近一次请求的格式，所以只发 0xB000 的
 //! 客户端只会收到 0xB000（C++ SDK 也只收 0xB000）。
 //!
 //! 服务端从不产生的输入一律是坏帧，[`Inbound::decode`] 返回 `Err`，由连接层拆掉连接：类型不是 0xB000、
-//! `CarrierStatus` 不是 1、`DataLength` 超出帧、消息体不是 MessagePack 对象，或缺少 / 类型错误的必需字段（包括
-//! response 的 `status`）。C++ SDK 忽略 `CarrierStatus`；`DataLength` 越界时读进下一帧而错位；其余情况报读错误并
-//! 丢弃该消息，等待中的请求不会失败，FIFO 随之错位；缺少 `status` 的响应被当作成功（重写方案 §5.4 第 6、7 条）。
+//! `DataLength` 超出帧、消息体不是 MessagePack 对象，或缺少 / 类型错误的必需字段（包括 response 的 `status`）。
+//! C++ SDK 在 `DataLength` 越界时读进下一帧而错位；其余情况报读错误并丢弃该消息，等待中的请求不会失败，FIFO
+//! 随之错位；缺少 `status` 的响应被当作成功（重写方案 §5.4 第 6、7 条）。`CarrierStatus` 与 C++ 一样不检查：
+//! 内存不足等错误路径上的带帧错误响应照常交给它的请求。
 //! 未知的 `type`（如 `debug`）得到 [`Inbound::Other`] 由调用方忽略；C++ 把它当作响应，会错配等待中的请求。
 //!
 //! 连接层只调用不做 I/O 的部分：主连接的 FIFO 对应器 [`ControlCore`] 与按服务端规则判断通知投递的
@@ -327,7 +328,7 @@ impl Inbound {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum InboundError {
-    /// 帧短于 [`HEADER_LEN`]、`Length` 不等于帧长、类型不是 0xB000、`CarrierStatus` 不是 1，或 `DataLength` 超出帧。
+    /// 帧短于 [`HEADER_LEN`]、`Length` 不等于帧长、类型不是 0xB000，或 `DataLength` 超出帧。
     #[error("malformed control carrier header")]
     Header,
     /// 消息体不是一条合法的 MessagePack 文档。
@@ -339,14 +340,14 @@ pub enum InboundError {
 }
 
 /// 校验服务端 carrier 头并切出消息体（零拷贝）。`Length` 必须等于帧长，与 [`gdp::decode_message`](crate::gdp::decode_message)
-/// 的规则相同。
+/// 的规则相同；`CarrierStatus` 不检查（见模块文档）。
 fn carrier_body(mut frame: Bytes) -> Option<Bytes> {
     let len = frame.len();
     let length = frame.try_get_u32_le().ok()?;
     let ty = frame.try_get_u16_le().ok()?;
-    let carrier_status = frame.try_get_i32_le().ok()?;
+    let _carrier_status = frame.try_get_i32_le().ok()?;
     let n = frame.try_get_u32_le().ok()? as usize;
-    if length as usize == len && ty == MSGPACK && carrier_status == 1 && n <= frame.len() {
+    if length as usize == len && ty == MSGPACK && n <= frame.len() {
         Some(frame.split_to(n))
     } else {
         None

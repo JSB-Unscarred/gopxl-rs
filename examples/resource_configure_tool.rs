@@ -82,7 +82,7 @@ fn main() -> common::Result {
         .resource(GOCATOR_CONTROL_PATH)
         .set("/enabled", true)?;
 
-    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段。
+    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段（协议假设 R2）。
     let tool_id = tool.path().rsplit('/').next().unwrap_or_default();
     let mut args = Value::object();
     args.set("source", format!("tools:{tool_id}:outputs:X"))?;

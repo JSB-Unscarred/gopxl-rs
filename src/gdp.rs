@@ -246,7 +246,7 @@ pub fn decode_message(mut frame: Bytes) -> Result<Message, GdpError> {
 }
 
 /// 解码控制通道 `/dataSources` 流的 bin：连续的完整消息，边界由每条消息的 `size` 决定，`size` 的规则与
-/// [`decode_message`] 相同。
+/// [`decode_message`] 相同。流载荷与 GDP-TCP 的消息逐字节相同是协议假设 T4。
 pub fn decode_all(mut payload: Bytes) -> Result<Vec<Message>, GdpError> {
     let mut messages = Vec::new();
     while payload.has_remaining() {
@@ -386,9 +386,11 @@ fn read_vec<T, const N: usize>(
     read: impl Fn([u8; N]) -> T,
 ) -> Result<Vec<T>, GdpError> {
     let data = take(buf, product(count, N)?)?;
-    // chunks_exact 的每块恰好 N 字节，first_chunk 总是 Some。
-    let items = data.chunks_exact(N).filter_map(<[u8]>::first_chunk);
-    Ok(items.map(|b| read(*b)).collect())
+    // chunks_exact 的每块恰好 N 字节，转换总是成功，默认值不会出现；map 让 collect 得到确切长度，只分配一次。
+    Ok(data
+        .chunks_exact(N)
+        .map(|b| read(b.try_into().unwrap_or([0; N])))
+        .collect())
 }
 
 /// 把 12 字节拆成 3 个 4 字节的小端值（`f32` 或 `u32` 的 x、y、z）。

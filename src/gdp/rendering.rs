@@ -132,7 +132,7 @@ pub struct Label {
     /// 位置 x、y、z。
     pub position: [f64; 3],
     /// 对齐（1.5 新增）：0 居中，1 / 2 中左 / 中右，4 / 5 / 6 中上 / 左上 / 右上，8 / 9 / 10 中下 / 左下 / 右下。
-    /// 段内剩余 ≥ 8 字节才与 `color` 一起读取（C++ 不读取）。
+    /// 段内剩余 ≥ 8 字节才与 `color` 一起读取（C++ 不读取，协议假设 G1）。
     pub alignment: Option<i32>,
     /// 颜色 0xAARRGGBB（1.5 新增），与 `alignment` 同时出现。
     pub color: Option<u32>,

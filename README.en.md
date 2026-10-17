@@ -25,7 +25,8 @@ libraries.
 
 `examples/` ports the official C++ samples with the same requests, order and timeouts; sample defects fixed while
 porting are listed at the top of each example. The device address comes from the `GOPXL_IP` environment variable
-(`IP` or `IP:port`), `192.168.1.10:3600` by default:
+(`IP` or `IP:port`, port 3600 by default); when it is unset, the examples run discovery first and use the only
+connectable (not remotely controlled) instance, failing when there is none or more than one:
 
 ```bash
 GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
@@ -74,7 +75,7 @@ implemented.
 | `GoResponse::Raw` | Not provided | The typed fields hold the whole content |
 | `kStatus_Name` | `control::Status::name`, `is_ok`; `impl Display for Status` | Returns the manual's name (`"notFound"`) |
 | `GoUri::UrlEncode`, `UrlDecode` | `control::url_encode(&str) -> String`, `control::url_decode(&str) -> Vec<u8>` | No `spaceAsPlus`; decoding never reads out of bounds and the result may not be UTF-8, so it returns bytes |
-| `GoRestClient` transaction queue (the reader thread completes each `GoTransaction` in send order) | `control::ControlCore`: `register(&Request) -> ReplyRx`, `on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`, `fail_all(&Arc<DisconnectReason>)` | Pure state machine with no I/O; the connection layer decodes each frame outside the lock and passes it in; registered before the request is written; a timed-out request leaves a tombstone that absorbs its late response; when a response carries a `path` and the head request is not `create`, the two are compared segment by segment, and a mismatch or a response with no pending request is an error, so the connection layer drops the connection (C++ carries on misaligned) |
+| `GoRestClient` transaction queue (the reader thread completes each `GoTransaction` in send order) | `control::ControlCore`: `register(&Request) -> ReplyRx`, `on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`, `fail_all(&Arc<DisconnectReason>)` | Pure state machine with no I/O; the connection layer decodes each frame outside the lock and passes it in; registered before the request is written; a timed-out request leaves a tombstone that absorbs its late response; when a response carries a `path` and the head request is not `create`, the two are compared segment by segment, and a mismatch is an error, so the connection layer drops the connection (C++ carries on misaligned); a response with no pending request is discarded (as in C++) |
 | `GoRestClient::Connect` | `control::Client::connect(SocketAddr) -> Result<Client>` | 1 s timeout; sets `TCP_NODELAY`, keepalive (probes every 10 s after 30 s idle) and a 10 s write timeout; port 0 is `InvalidArgument` (C++ passes it straight to the socket) |
 | `GoRestClient::Disconnect` | `drop(client)` | Pending requests fail with `Disconnected(Closed)`; only shuts the socket down and never joins the reader thread, so it never blocks (C++ joins before shutting down and can hang) |
 | `GoRestClient::IsConnected` | `control::Handle::is_connected() -> bool` | `false` once the connection is torn down (C++ stays true after the connection is lost); `Client` reaches the `Handle` methods through `Deref`, and `Client::handle()` returns a handle that can move to other threads |
@@ -179,14 +180,14 @@ Filled in as each layer is implemented.
 | `GoJsonError` | `PointerError`, `value::msgpack::DecodeError`, `value::msgpack::EncodeError`, `serde_json::Error` | Reads return `Option` and never fail |
 | Control channel message body (carrier type 0xB000, MessagePack) | `value::msgpack` | Encoding is byte-identical to nlohmann 3.8.0 (shortest integers, float64, keys in byte order); decoding does not depend on integer width or key order, and ext is read as `Bin` |
 | Length-prefixed frames: carrier frames, GDP messages | `frame::FrameReader`, `frame::FrameError`; `control::HEADER_LEN` (14), `gdp::HEADER_LEN` (6) | The little-endian `u32` length includes itself; the length is checked before an exact allocation; `WouldBlock` loses no bytes already read |
-| Carrier frame (`GoCtrlChannelV1`) | `Request::encode`, `Inbound::decode` | The client sends and receives only 0xB000: the server replies in the request's format, and the C++ SDK also accepts only 0xB000; `CarrierStatus` must be 1 |
+| Carrier frame (`GoCtrlChannelV1`) | `Request::encode`, `Inbound::decode` | The client sends and receives only 0xB000: the server replies in the request's format, and the C++ SDK also accepts only 0xB000; like C++, `CarrierStatus` is not checked |
 | `GoRequestMethod::Method` | `control::Method` |  |
 | `GoResponseType` | `control::Inbound`: `Response`, `Notification`, `Stream`, `Other` |  |
 | `GoNotificationType` | `control::EventType` | Includes `Other(String)` |
 | Stream status strings (`streaming` / `complete` / `abort`) | `control::StreamState` | Includes `Other(String)` |
 | `kStatus` | `control::Status(i32)` with every constant (including −975 `OVERHEAT`) | Values outside the table are kept as is |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`, `control::InboundError` |  |
-| Disconnects reported through `SetDisconnectHandler` (C++ gives no reason) | `control::DisconnectReason`: `Closed`, `Eof`, `Read`, `Write`, `Decode`, `Unsolicited`, `Desync` | Every pending request fails with the same `Arc` reason; stream and GDP connections report their disconnects with it too |
+| Disconnects reported through `SetDisconnectHandler` (C++ gives no reason) | `control::DisconnectReason`: `Closed`, `Eof`, `Read`, `Write`, `Decode`, `Desync` | Every pending request fails with the same `Arc` reason; stream and GDP connections report their disconnects with it too |
 | `GoChannelError`, `GoRequestError` (.NET `GoChannelException`, `GoRequestException`) | `Error`: `Connect`, `Timeout`, `Disconnected`, `Request(Box<RequestError>)`, `Payload`, `Validation`, `InvalidArgument`; `RequestError` carries the method, path and full `Response` | `Display` includes the description of the first `payload.errors` entry; with an OK `status`, `payload.errors` is not turned into an error (same as the SDK); `Payload` means a field `System`, `Resource::get` or `create_child` reads is missing or has the wrong type (C++ throws `GoJsonError` / `GoResourceError`); for `Validation` see `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`: `Ready`, `Running`, `Conflict`, `Other(i64)` | 0, 1, 2 and values outside the table |
 | `GoTransaction` | `control::Transaction` |  |

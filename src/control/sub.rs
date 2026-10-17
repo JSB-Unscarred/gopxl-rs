@@ -58,7 +58,7 @@ impl SubscriptionExpr {
         &self.text
     }
 
-    /// 服务端是否会因为这个订阅投递该事件（`AsyncChannel::IsSubscribed`）。
+    /// 服务端是否会因为这个订阅投递该事件（`AsyncChannel::IsSubscribed`；服务端只按这一规则投递是协议假设 S2）。
     pub fn delivers(&self, event: &EventType, path: &str) -> bool {
         let bytes = bytes(path);
         match event {

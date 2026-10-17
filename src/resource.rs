@@ -239,8 +239,8 @@ impl Resource {
     /// `_embedded` 中关系 `rel` 的各个子资源，对应 C++ 的 `Children`；子资源继承超时与校验设置。
     ///
     /// 展开层级不为 0 时条目就是子资源的数据（服务端按请求的 `expandLevel` 展开），直接放进子资源的缓存，子资源的
-    /// 展开层级取服务端渲染条目用的下一层（−1 不变，n > 0 为 n − 1，其他为 0，重写方案 §1.4.10），缓存与层级一致。C++ 按条目的键数猜测是否已
-    /// 展开，把带 `ordIndex` 的链接也当作数据放进缓存（§5.4 第 33 条）。
+    /// 展开层级取服务端渲染条目用的下一层（−1 不变，n > 0 为 n − 1，其他为 0，协议假设 R1），缓存与层级一致。C++ 按
+    /// 条目的键数猜测是否已展开，把带 `ordIndex` 的链接也当作数据放进缓存（§5.4 第 33 条）。
     pub fn children(&mut self, rel: &str) -> Result<Vec<Resource>> {
         let expanded = self.expand_level != 0;
         let expand_level = match self.expand_level {
@@ -262,7 +262,7 @@ impl Resource {
     }
 
     /// 在本集合中创建子资源（`create`），对应 C++ 的 `CreateChild`。新资源的路径取响应载荷的 `path`，没有时取
-    /// `_links.self.href`，都没有时报 `Payload`。
+    /// `_links.self.href`，都没有时报 `Payload`（响应形态是协议假设 R2）。
     pub fn create_child(&self, args: impl Into<Value>) -> Result<Resource> {
         let response = self.handle.create(&self.path, args);
         let payload = response.timeout(self.timeout).response()?.payload;
@@ -324,9 +324,9 @@ impl Resource {
     /// 订阅本资源及其后代的变更（表达式 `<路径>/*`），对应 C++ 的 `Subscribe`；已订阅时什么也不做。之后其他客户端与
     /// 设备自身的修改也会使缓存过期。
     ///
-    /// C++ 订阅精确路径，收不到子项的 `created` / `deleted`（§5.4 第 40 条）。通知总是带规范路径，所以以 `extId=`
-    /// 访问的资源、不是规范路径（不以 `/` 开头或有空段）的资源都收不到通知：订阅 `create_child`、`children` 得到的
-    /// 资源。订阅之前的修改没有通知，所以订阅时丢弃数据缓存。
+    /// C++ 订阅精确路径，收不到子项的 `created` / `deleted`（§5.4 第 40 条；`*` 的投递是协议假设 S3）。通知总是带
+    /// 规范路径，所以以 `extId=` 访问的资源、不是规范路径（不以 `/` 开头或有空段）的资源都收不到通知：订阅
+    /// `create_child`、`children` 得到的资源。订阅之前的修改没有通知，所以订阅时丢弃数据缓存。
     pub fn subscribe(&mut self) -> Result<()> {
         if self.subscription.is_none() {
             let expr = format!("{}/*", self.path.trim_end_matches('/'));

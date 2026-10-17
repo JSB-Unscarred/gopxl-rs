@@ -29,9 +29,6 @@ pub enum DisconnectReason {
     /// 坏帧：服务端从不产生，字节流已不可信。
     #[error(transparent)]
     Decode(#[from] InboundError),
-    /// 挂起队列为空时收到响应：之前某个响应已被错配，或这是一条孤立响应。
-    #[error("response without a pending request")]
-    Unsolicited,
     /// 响应的 `path` 与队首请求的路径不同：FIFO 已错位。
     #[error("response path {got:?} does not match request path {expected:?}")]
     Desync {
@@ -57,7 +54,8 @@ pub type ReplyRx = Receiver<Reply>;
 ///   C++ SDK 先入队后发送，发送失败留下孤儿事务（重写方案 §5.4 第 1 条）。
 /// - 服务端内部请求失败时会多发一条孤立响应，两个 SDK 都把它当作队首的应答，此后全部错位（§5.4 第 42 条）。
 ///   流与文件传输不走主连接，已知的触发条件不会出现在这里；其余来源用响应的 `path` 检测（见
-///   [`DisconnectReason`]），拆连接好过把响应交给错误的调用方。
+///   [`DisconnectReason`]），拆连接好过把响应交给错误的调用方（协议假设 C1）。挂起队列为空时到达的响应不属于
+///   任何请求，与 C++ 一样丢弃，FIFO 不受影响。
 #[derive(Debug, Default)]
 pub struct ControlCore {
     pending: VecDeque<Slot>,
@@ -66,7 +64,7 @@ pub struct ControlCore {
 /// 一个已写出、未应答的请求。
 #[derive(Debug)]
 struct Slot {
-    /// 响应带 `path` 时应指向的路径；`create` 的响应可能回显新建子资源的路径（未确认，OQ-17），为 `None`，不比较。
+    /// 响应带 `path` 时应指向的路径；`create` 的响应可能回显新建子资源的路径（协议假设 C1、R2），为 `None`，不比较。
     path: Option<String>,
     tx: SyncSender<Reply>,
 }
@@ -90,7 +88,9 @@ impl ControlCore {
     ) -> Result<Option<Notification>, DisconnectReason> {
         match inbound {
             Inbound::Response(response) => {
-                let slot = self.pending.front().ok_or(DisconnectReason::Unsolicited)?;
+                let Some(slot) = self.pending.front() else {
+                    return Ok(None);
+                };
                 if let Some(expected) = &slot.path {
                     if !response.path.is_empty() && !same_path(expected, &response.path) {
                         return Err(DisconnectReason::Desync {
@@ -178,9 +178,9 @@ mod tests {
     }
 
     // 守卫（§5.4 第 42 条）：path 按服务端的路由规则比较（空段不计），不一致即 Desync，槽位留在队列里由
-    // fail_all 以同一个原因完成；create 豁免；挂起队列为空时 Unsolicited。主连接上的流消息与未知 type 忽略。
+    // fail_all 以同一个原因完成；create 豁免；挂起队列为空时的响应丢弃。主连接上的流消息与未知 type 忽略。
     #[test]
-    fn guard_detects_desync_and_unsolicited() {
+    fn guard_detects_desync() {
         let mut core = ControlCore::default();
         let response = |path: &str| {
             inbound(&format!(
@@ -203,10 +203,7 @@ mod tests {
         for text in ignored {
             assert_eq!(core.on_inbound(inbound(text)).unwrap(), None);
         }
-        assert!(matches!(
-            core.on_inbound(response("/a")),
-            Err(DisconnectReason::Unsolicited)
-        ));
+        assert_eq!(core.on_inbound(response("/a")).unwrap(), None);
 
         let rx = register(&mut core, Method::Read, "/system");
         let error = core.on_inbound(response("/replay")).unwrap_err();
@@ -227,15 +224,11 @@ mod tests {
         let receivers: Vec<_> = (0..3)
             .map(|i| register(&mut core, Method::Read, &format!("/{i}")))
             .collect();
-        let reason = Arc::new(DisconnectReason::Unsolicited);
+        let reason = Arc::new(DisconnectReason::Closed);
         core.fail_all(&reason);
         for rx in &receivers {
             assert!(Arc::ptr_eq(&rx.try_recv().unwrap().unwrap_err(), &reason));
             assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
         }
-        assert!(matches!(
-            core.on_inbound(inbound(r#"{"type":"response","status":1}"#)),
-            Err(DisconnectReason::Unsolicited)
-        ));
     }
 }

@@ -1,10 +1,9 @@
 //! 示例共用的部分，对应 C++ 示例的 `SampleUtils`：设备地址、路径与超时常量、连接检查、GDP 输出的设置、数据集的
 //! 打印与 BMP 写出。
 //!
-//! 每个示例以 `mod common;` 引入；设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），默认
-//! `192.168.1.10:3600`，即 C++ 示例写死的 `SYSTEM_IP`。被远程控制（加速）的传感器要连接控制方，通常是
-//! `127.0.0.1`。换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 与路径，示例的其他路径与数据源都由它们
-//! 拼出。
+//! 每个示例以 `mod common;` 引入；设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），未设置时先发现
+//! （C++ 示例写死 `SYSTEM_IP` 为 `192.168.1.10`）。被远程控制（加速）的传感器要连接控制方，通常是 `127.0.0.1`。
+//! 换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 与路径，示例的其他路径与数据源都由它们拼出。
 
 #![allow(dead_code, reason = "每个示例只用到其中一部分")]
 
@@ -12,6 +11,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use gopxl::control::Handle;
+use gopxl::discovery::{self, Instance};
 use gopxl::gdp::{Body, Cas, GdpClient, Image, Message, PixelFormat, ProfileAttrs};
 use gopxl::{RunState, System, Value, control};
 
@@ -91,16 +91,36 @@ pub const IMAGE_FILE: &str = "ImageOutput.bmp";
 /// 无效的轮廓与表面点（`k16S_NULL`）。
 pub const NULL: i16 = i16::MIN;
 
-/// 连接 `GOPXL_IP`（未设置时为 `192.168.1.10:3600`），对应 C++ 示例开头的 `SetAddress`、`SetControlPort` 与
-/// `Connect`。
+/// 发现的等待时长。
+pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 连接 `GOPXL_IP`，对应 C++ 示例开头的 `SetAddress`、`SetControlPort` 与 `Connect`；未设置时用
+/// [`discover_one`] 找到的实例。
 pub fn connect() -> Result<System> {
-    let text = std::env::var("GOPXL_IP").unwrap_or_else(|_| "192.168.1.10".to_owned());
-    let addr = match text.parse() {
-        Ok(addr) => addr,
-        Err(_) => SocketAddr::new(text.parse()?, control::DEFAULT_PORT),
+    let addr = match std::env::var("GOPXL_IP") {
+        Ok(text) => match text.parse() {
+            Ok(addr) => addr,
+            Err(_) => SocketAddr::new(text.parse()?, control::DEFAULT_PORT),
+        },
+        Err(_) => discover_one()?,
     };
     println!("Connecting to {addr}...");
     Ok(System::connect(addr)?)
+}
+
+/// 发现唯一一台可连接（未被远程控制）的 GoPxL 实例，返回它的控制通道地址。没有或有多台时返回错误，由
+/// `GOPXL_IP` 指定，避免连到别的设备上改配置。
+fn discover_one() -> Result<SocketAddr> {
+    println!("GOPXL_IP is not set, discovering...");
+    let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT, false)?
+        .iter()
+        .filter_map(Instance::control_addr)
+        .collect();
+    match found.as_slice() {
+        [addr] => Ok((*addr).into()),
+        [] => Err("no connectable GoPxL instance found; set GOPXL_IP".into()),
+        _ => Err(format!("found {found:?}; set GOPXL_IP to one of them").into()),
+    }
 }
 
 /// 打印 API 版本与设备信息，确认设备没有被远程控制；对应 C++ 的 `VerifyConnection`。被远程控制时返回错误：

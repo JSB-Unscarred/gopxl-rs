@@ -9,18 +9,15 @@
 mod common;
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 use gopxl::System;
 use gopxl::discovery::{self, Instance};
 
-/// 发现的等待时长。
-const DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 /// 实例上可见的传感器。
 const VISIBLE_SENSORS_PATH: &str = "/scan/visibleSensors/";
 
 fn main() -> common::Result {
-    let instances = discovery::discover(DISCOVER_TIMEOUT, false)?;
+    let instances = discovery::discover(common::DISCOVER_TIMEOUT, false)?;
     println!("Number of sensors on the network: {}", instances.len());
     if instances.is_empty() {
         return Err(

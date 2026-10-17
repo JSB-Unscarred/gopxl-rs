@@ -22,7 +22,8 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 ## 示例
 
 `examples/` 是官方 C++ 示例的移植，请求、顺序与超时与 C++ 相同；移植时修掉的示例缺陷写在各示例的文档开头。
-设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），默认 `192.168.1.10:3600`：
+设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`，端口默认 3600）；未设置时先发现，使用唯一一台可连接
+（未被远程控制）的实例，没有或有多台时报错：
 
 ```bash
 GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
@@ -70,7 +71,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResponse::Raw` | 不提供 | 类型化的字段已包含全部内容 |
 | `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
-| `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致或挂起队列为空时报错，由连接层拆连接（C++ 错位后继续） |
+| `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致时报错，由连接层拆连接（C++ 错位后继续）；挂起队列为空时的响应丢弃（同 C++） |
 | `GoRestClient::Connect` | `control::Client::connect(SocketAddr) -> Result<Client>` | 超时 1 s；设置 `TCP_NODELAY`、keepalive（空闲 30 s 后每 10 s 探测）与 10 s 写超时；端口 0 报 `InvalidArgument`（C++ 直接交给 socket） |
 | `GoRestClient::Disconnect` | `drop(client)` | 挂起的请求以 `Disconnected(Closed)` 失败；只 shutdown、不 join 读线程，从不阻塞（C++ 先 join 后 shutdown，可能挂住） |
 | `GoRestClient::IsConnected` | `control::Handle::is_connected() -> bool` | 拆连接后为 `false`（C++ 连接丢失后仍为真）；`Client` 经 `Deref` 调用 `Handle` 的方法，`Client::handle()` 取得可移到别的线程的句柄 |
@@ -175,14 +176,14 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoJsonError` | `PointerError`、`value::msgpack::DecodeError`、`value::msgpack::EncodeError`、`serde_json::Error` | 读取返回 `Option`，不报错 |
 | 控制通道消息体（carrier 类型 0xB000，MessagePack） | `value::msgpack` | 编码与 nlohmann 3.8.0 逐字节一致（最短整数、float64、键按字节序）；解码不依赖整数宽度与键序，ext 当作 `Bin` |
 | 长度前缀帧：carrier 帧、GDP 消息 | `frame::FrameReader`、`frame::FrameError`；`control::HEADER_LEN`（14）、`gdp::HEADER_LEN`（6） | 小端 `u32` 长度包含自身；先校验长度再精确分配；`WouldBlock` 不丢失已读字节 |
-| carrier 帧（`GoCtrlChannelV1`） | `Request::encode`、`Inbound::decode` | 客户端只收发 0xB000：服务端按请求的格式回复，C++ SDK 也只收 0xB000；`CarrierStatus` 必须为 1 |
+| carrier 帧（`GoCtrlChannelV1`） | `Request::encode`、`Inbound::decode` | 客户端只收发 0xB000：服务端按请求的格式回复，C++ SDK 也只收 0xB000；与 C++ 一样不检查 `CarrierStatus` |
 | `GoRequestMethod::Method` | `control::Method` |  |
 | `GoResponseType` | `control::Inbound`：`Response`、`Notification`、`Stream`、`Other` |  |
 | `GoNotificationType` | `control::EventType` | 含 `Other(String)` |
 | 流状态字符串（`streaming` / `complete` / `abort`） | `control::StreamState` | 含 `Other(String)` |
 | `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
-| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
+| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
 | `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`Validation`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System`、`Resource::get` 或 `create_child` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）；`Validation` 见 `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`：`Ready`、`Running`、`Conflict`、`Other(i64)` | 0、1、2 与表外的值 |
 | `GoTransaction` | `control::Transaction` |  |

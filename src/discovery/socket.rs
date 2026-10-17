@@ -90,8 +90,9 @@ fn receiver(port: u16) -> io::Result<UdpSocket> {
     Ok(socket.into())
 }
 
-/// 每个已启用的非回环 IPv4 地址一个发送 socket：受限广播只从绑定地址所在的网卡发出，多网卡的工控机要逐个发送。
-/// 包含 169.254.x.x：直连设备、没有 DHCP 时网卡就是这类地址。单个网卡出错只跳过它。
+/// 每个已启用的非回环（协议假设 D2）IPv4 地址一个发送 socket，绑定临时端口（协议假设 D1）：受限广播只从绑定地址
+/// 所在的网卡发出，多网卡的工控机要逐个发送。包含 169.254.x.x：直连设备、没有 DHCP 时网卡就是这类地址。单个网卡
+/// 出错只跳过它。
 fn senders() -> io::Result<Vec<UdpSocket>> {
     let senders = if_addrs::get_if_addrs()?
         .into_iter()

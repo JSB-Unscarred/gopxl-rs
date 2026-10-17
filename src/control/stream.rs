@@ -24,7 +24,7 @@ use crate::value::Value;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 流消息通道的容量。消费者跟不上时读线程阻塞，TCP 背压传到服务端（服务端写超时 10 s 后断开连接，
-/// [`StreamHandle::recv_timeout`] 返回 `Disconnected`）；容量小，`/dataSources` 的大消息不会在本地积压。
+/// [`StreamHandle::recv_timeout`] 返回 `Disconnected`，协议假设 T3）；容量小，`/dataSources` 的大消息不会在本地积压。
 const QUEUE: usize = 4;
 
 /// 一个流，拥有自己的连接与读线程；owned、`Send`，可以移到任何线程。Drop 即关闭连接（C++ 的 `StopStream`），
@@ -37,7 +37,8 @@ pub struct StreamHandle {
 
 impl Handle {
     /// 在新连接上开始流 `path`（例如 `/system/metrics`、`/dataSources/<id>/data`），`payload` 原样放进请求
-    /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。
+    /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。每个流一条连接是协议
+    /// 假设 T1。
     pub fn open_stream(&self, path: &str, payload: impl Into<Value>) -> Result<StreamHandle> {
         let request = with_payload(Method::Stream, path, payload);
         let frame = encode(&request)?;

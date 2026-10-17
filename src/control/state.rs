@@ -1,20 +1,31 @@
-//! 控制通道的协议状态机（纯逻辑，不做 I/O、不起线程）：主连接的 [`ControlCore`] 按 FIFO 把响应交给请求，
-//! 流连接的 [`StreamCore`] 区分应答、数据与结束消息。连接层在锁外用 [`Inbound::decode`] 解码每一帧（坏帧即
-//! [`DisconnectReason::Decode`]），再交给它们，按返回值投递或拆连接。
+//! 主连接的协议状态机 [`ControlCore`]（纯逻辑，不做 I/O、不起线程）：按 FIFO 把响应交给请求。连接层在锁外用
+//! [`Inbound::decode`] 解码每一帧（坏帧即 [`DisconnectReason::Decode`]），再交给它，按返回值投递或拆连接。
 
 use std::collections::VecDeque;
+use std::io;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-use super::{
-    Inbound, InboundError, Method, Notification, Request, Response, Status, StreamMessage,
-    StreamState,
-};
+use super::{Inbound, InboundError, Method, Notification, Request, Response};
+use crate::frame::FrameError;
 
 /// 拆掉连接的原因。所有挂起的请求以同一个原因（`Arc`）失败：调用方能做的只有重连，所以各种原因不分别报错。
+/// 流连接与 GDP 连接的断开也用它表示。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DisconnectReason {
+    /// 本端关闭了连接（`Client` 被 drop）。
+    #[error("closed by the client")]
+    Closed,
+    /// 服务端在帧边界上关闭了连接。
+    #[error("closed by the server")]
+    Eof,
+    /// 读取失败、帧中途 EOF，或长度字段越界。
+    #[error(transparent)]
+    Read(#[from] FrameError),
+    /// 写出失败或超时（10 s）：可能只写出了半帧，字节流已不可信。
+    #[error("write failed: {0}")]
+    Write(io::Error),
     /// 坏帧：服务端从不产生，字节流已不可信。
     #[error(transparent)]
     Decode(#[from] InboundError),
@@ -113,47 +124,6 @@ fn same_path(a: &str, b: &str) -> bool {
         path.split('/').filter(|segment| !segment.is_empty())
     }
     segments(a).eq(segments(b))
-}
-
-/// 流连接的状态机。每个流一条自有连接，只发一个 `stream` 请求，所以只有“等应答”和“已应答”两个状态。
-///
-/// - `/dataSources` 的数据走服务端的另一个队列，可能先于应答到达，照常作为数据；
-/// - 应答之后的响应都是服务端内部请求（`removeStream`、`streamStart`）失败产生的孤立响应，忽略。两个 SDK
-///   在共享连接上把它当作下一个请求的应答（§5.4 第 42 条）。
-#[derive(Debug, Default)]
-pub struct StreamCore {
-    replied: bool,
-}
-
-/// [`StreamCore::on_inbound`] 的结果。
-#[derive(Clone, Debug, PartialEq)]
-pub enum StreamEvent {
-    /// `stream` 请求的应答；`status` 不是 OK 时流未开始。
-    Reply(Response),
-    /// 数据消息（`streaming`，以及未知的 `streamStatus`）。
-    Data(StreamMessage),
-    /// 结束消息：`OK` 表示 complete，否则是 abort 的原因（例如资源被删除时为 `CLOSED`）。服务端随后自行删除流。
-    /// `/dataSources` 的数据可能紧跟在它之后：服务端每轮输出先写响应队列（含结束消息）、再写流队列。
-    End(Status),
-    /// 孤立响应、通知与未知 `type`。
-    Ignored,
-}
-
-impl StreamCore {
-    /// 处理流连接上的一条消息。
-    pub fn on_inbound(&mut self, inbound: Inbound) -> StreamEvent {
-        match inbound {
-            Inbound::Response(response) if !self.replied => {
-                self.replied = true;
-                StreamEvent::Reply(response)
-            }
-            Inbound::Stream(message) => match message.state {
-                StreamState::Complete | StreamState::Abort => StreamEvent::End(message.status),
-                _ => StreamEvent::Data(message),
-            },
-            _ => StreamEvent::Ignored,
-        }
-    }
 }
 
 // 保留原因：ControlCore 是自有设计，无法与官方实现对照，出错时响应会静默交给错误的调用方。

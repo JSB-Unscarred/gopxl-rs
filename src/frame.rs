@@ -4,7 +4,7 @@
 //! - 长度先校验在 `[min, max]` 内再分配，声明 4 GiB 的坏帧不会触发巨量分配；
 //! - 每帧按长度精确分配，返回的 `Bytes` 独占这块内存：解码得到的切片（`Value::Bin`、GDP 数据）只会让自己所在的帧
 //!   存活，不会钉住共享的读缓冲；
-//! - 已读的字节保存在读取器里：非阻塞 socket 返回 `WouldBlock` 后再次调用，从断点继续（GDP 接收用非阻塞 socket）。
+//! - 已读的字节保存在读取器里：非阻塞 socket 返回 `WouldBlock` 后再次调用，从断点继续。
 
 #![deny(
     clippy::indexing_slicing,

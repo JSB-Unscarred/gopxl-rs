@@ -27,6 +27,7 @@
     clippy::panic
 )]
 
+mod client;
 mod image;
 mod mesh;
 mod profile;
@@ -40,6 +41,7 @@ use bytes::{Buf, Bytes, TryGetError};
 
 use crate::control::Status;
 
+pub use client::{GdpClient, RecvError};
 pub use image::{Image, PixelFormat};
 pub use mesh::{Mesh, MeshChannel, MeshData};
 pub use profile::{ProfileAttrs, ProfilePointCloud, UniformProfile};

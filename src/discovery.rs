@@ -25,6 +25,9 @@
 )]
 
 pub mod classic;
+mod socket;
+
+pub use socket::discover;
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 

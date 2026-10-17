@@ -51,7 +51,26 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
 | `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致或挂起队列为空时报错，由连接层拆连接（C++ 错位后继续） |
-| `GoRestClient` 的流消息分派（`SetStreamHandler`） | `control::StreamCore::on_inbound(Inbound) -> StreamEvent` | 每个流一条连接；应答前的数据照常产出，应答之后的孤立响应忽略（C++ 当作下一个请求的应答） |
+| `GoRestClient::Connect` | `control::Client::connect(SocketAddr) -> Result<Client>` | 超时 1 s；设置 `TCP_NODELAY`、keepalive（空闲 30 s 后每 10 s 探测）与 10 s 写超时；端口 0 报 `InvalidArgument`（C++ 直接交给 socket） |
+| `GoRestClient::Disconnect` | `drop(client)` | 挂起的请求以 `Disconnected(Closed)` 失败；只 shutdown、不 join 读线程，从不阻塞（C++ 先 join 后 shutdown，可能挂住） |
+| `GoRestClient::IsConnected` | `control::Handle::is_connected() -> bool` | 拆连接后为 `false`（C++ 连接丢失后仍为真）；`Client` 经 `Deref` 调用 `Handle` 的方法，`Client::handle()` 取得可移到别的线程的句柄 |
+| `GoRestClient::Read`、`Update`、`Create`、`Delete`、`Call` | `Handle::read(&str)`、`update(&str, impl Into<Value>)`、`create(&str, impl Into<Value>)`、`delete(&str)`、`call(&str, impl Into<Value>)`，均返回 `Transaction` | 第二个参数即 C++ 的 `content`（线上的 `payload`）；`args` 经 `Handle::send` 设置；在写锁内先登记再写出（C++ 先入队后发送，发送失败留下孤儿事务）；写出失败或超时即拆连接 |
+| — | `Handle::send(Request) -> Transaction` | 任意方法与 `args`，`listSub`、`clearSub`、`listStream` 也经它发送（两个 SDK 都没有）；`stream`、`cancelStream` 报 `InvalidArgument`，流见 `open_stream` |
+| `GoTransaction::GetResponse`、`CheckResponse` | `Transaction::timeout(Duration) -> Transaction`、`response() -> Result<Response>` | 默认 3 s，从 `response()` 开始计；`status` 不是 OK 时为 `Error::Request`；超时为 `Error::Timeout`，槽位成为墓碑，连接照常可用；丢弃 `Transaction` 即 fire-and-forget |
+| `GoTransaction::GetRequest`、`GetResponseFuture` | 不提供 | 请求在调用方手里；方法与路径出现在错误里 |
+| `GoRestClient::Sub`、`UnSub`、`SetSubHandler` | `Handle::subscribe(&str) -> Result<Subscription>`；`Subscription::recv_timeout(Duration) -> Result<Option<Notice>>`、`iter()`；drop 即退订 | 拉取式：每个订阅一个队列（1024 条，满了丢最老的并产出 `Notice::Lagged`，读线程从不阻塞）；只收到服务端按该表达式会投递的通知（C++ 的全局处理器收到全部通知）；同一表达式的订阅共享服务端订阅，最后一个 drop 时写出 `unSub`，不等应答；`sub` 失败或超时时退回租约（超时后才执行的 `sub` 由随后的 `unSub` 撤销） |
+| `GoRestClient::AddNotificationListener`、`RemoveNotificationListener`、`ClearAllListeners` | `Handle::add_listener(&str, impl FnMut(Notice)) -> Result<Listener>`；drop `Listener` | 每个监听器一个线程，按到达顺序回调（C++ 每条通知起一个线程、乱序；回调在锁内执行，重入即死锁）；`sub` 失败时不留下监听器；移除时丢弃未处理的通知 |
+| `GoRestClient::ReplaceListenerCallback` | 不提供 | drop 旧的 `Listener` 再 `add_listener` |
+| `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Handle::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(Duration) -> Result<Option<StreamMessage>>`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
+| `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | `Handle::on_disconnect(impl FnOnce(&DisconnectReason))` | 连接丢失时在一个新线程上调用一次并给出原因，回调里可以发请求、重连；`Client` 的 drop 不触发；已断开时立即调用；只在真正拆连接时触发（C++ 一个坏消息就触发） |
+| — | `Handle::transfer(Request, Duration) -> Result<Response>` | 文件传输（归档、恢复、升级、作业与回放数据）用的临时连接，不阻塞主连接；超时是连续没有收到字节的时长；下载的 `Bin` 引用响应帧 |
+| `GoSystem::Address`、`ControlPort` | `Handle::addr() -> SocketAddr` |  |
+| `GoGdpClient::Connect`、`Close` | `gdp::GdpClient::connect(SocketAddr) -> Result<GdpClient>`；drop | 超时 5 s；读线程逐条解码；从不写 socket |
+| `GoGdpClient::ReceiveDataSync`、`DataSet`、`ReceiveDataAsync` | `GdpClient::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | 按 `cas.is_last_msg` 组集；单一截止时间（C++ 读到一半时不限时）；区分 `Timeout` 与 `Incomplete`，已收到的消息保留到下一次；异步接收即在自己的线程里循环；本地只缓冲 4 条，不读时背压到服务端（C++ 的异步队列无界）；信封或 CAS 坏掉的消息丢弃 |
+| `GoGdpClient::ClearData` | `GdpClient::clear_data(&mut self) -> Result<()>` | 重连，丢弃积压的数据与未完成的数据集 |
+| `GoGdpClient::IsConnected`、`IpAddress`、`Port` | 不提供 | 断开后 `receive` 返回 `RecvError::Disconnected`；地址由调用方给出 |
+| `GoDiscoveryClient::BlockingDiscover`、`InstanceList` | `discovery::discover(Duration, bool) -> io::Result<Vec<Instance>>` | 每个启用的 IPv4 网卡（含 169.254.x.x）各发一次，单个网卡失败不影响其他网卡；0、300、1000 ms 重发（C++ 只发一次）；按（地址，Web 端口）去重；GoPxL 实例在前；每次调用都是全新的状态（C++ 的经典列表从不清空） |
+| `GoDiscoveryClient::GoPxLInstanceList`、`ClassicInstanceList`、`Instance`、`GoPxLInstance`、`ClassicInstance` | 按 `Instance::classic`、`address`、`web_port`、`serial_number` 筛选 `discover` 的结果 |  |
 | `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \` 与 NUL（服务端在 NUL 处截断表达式），生成的正则无法编译时同样报错 |
 | `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | 路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`）；路径与 `Value::pointer` 同一语法（`/` 是键 `""`，C++ 把它当作根）；`type` 为可空数组时同样导航 |
 | `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计；`type: "null"` 只接受 `Nil`（C++ 不认识它，一律通过） |
@@ -99,9 +118,15 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 | 流状态字符串（`streaming` / `complete` / `abort`） | `control::StreamState` | 含 `Other(String)` |
 | `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
-| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；I/O 原因随连接层加入 |
+| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Unsolicited`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
+| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致） |
+| `GoTransaction` | `control::Transaction` |  |
 | 应答通道（C++ 的 `GoTransaction` 内部状态） | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | 由 `register` 建立的 `sync_channel(1)`，读线程持锁发送时从不阻塞；丢弃即墓碑 |
-| `GoStreamHandler` 收到的 `GoStreamResponse` 与 `stream` 的应答 | `control::StreamEvent`：`Reply`、`Data`、`End(Status)`、`Ignored` | `End` 的 `OK` 即 complete，否则是 abort 的原因；`/dataSources` 的数据可能紧跟在 `End` 之后 |
+| `GoNotificationHandler`、`NotificationCallback` 收到的通知 | `control::Notice`：`Event(Arc<Notification>)`、`Lagged(u64)` | 一条通知投递给多个订阅时共享；`Lagged` 是在此之前丢掉的条数 |
+| `NotificationListenerId` | `control::Listener` | drop 即移除 |
+| `GoStreamHandler` 收到的 `GoStreamResponse` | `control::StreamMessage`（`StreamHandle::recv_timeout` 取出） | 结束消息照常取出：`state` 为 `Complete` / `Abort`，`status` 为结束原因；`/dataSources` 的数据可能紧跟在结束消息之后（服务端每轮先写响应队列、再写流队列） |
+| `GoDataSet` | `Vec<gdp::Message>` | 以 `is_last_msg` 的消息结束 |
+| `ReceiveDataSync` 的超时与不完整 | `gdp::RecvError`：`Timeout`、`Incomplete { messages }`、`Disconnected` |  |
 | 服务端的 `SubscriptionExpression` | `control::SubscriptionExpr`、`control::SubExprError` | 两个正则（R、E）逐字移植后由 regex-lite 编译 |
 | `_schema`（基于 JSON Schema Draft 2019-09 的方言） | `Value` | 注解（`unit`、`visibility`、`extendedType` …）直接读取 |
 | `GoResourceValidationError::Errors()` | `schema::Issue` | 每个关键字一个变体 |

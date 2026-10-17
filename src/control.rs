@@ -1,5 +1,9 @@
-//! 控制通道（TCP）的线上编解码：carrier 帧与 MessagePack 消息体，对应 C++ SDK 的 `GoRequest`、`GoResponse`
-//! 与 `GoCtrlChannelV1` 的帧格式。
+//! 控制通道（TCP）：连接（[`Client`]、[`Handle`]、[`Subscription`]、[`StreamHandle`]，对应 C++ 的
+//! `GoRestClient`）与线上编解码（carrier 帧与 MessagePack 消息体，对应 `GoRequest`、`GoResponse` 与
+//! `GoCtrlChannelV1` 的帧格式）。
+//!
+//! 一台设备的连接：主连接（`Client`，请求与订阅）、每个流一条（`StreamHandle`）、每次文件传输一条临时连接
+//! （[`Handle::transfer`]），对应 C++ 在一条连接上承载的全部流量。
 //!
 //! carrier 帧的整数都是小端，`Length` 包含自身 4 字节：
 //!
@@ -17,8 +21,8 @@
 //! 丢弃该消息，等待中的请求不会失败，FIFO 随之错位；缺少 `status` 的响应被当作成功（重写方案 §5.4 第 6、7 条）。
 //! 未知的 `type`（如 `debug`）得到 [`Inbound::Other`] 由调用方忽略；C++ 把它当作响应，会错配等待中的请求。
 //!
-//! 另含不做 I/O 的协议状态机：主连接的 FIFO 对应器 [`ControlCore`]、流连接的 [`StreamCore`]，以及按服务端规则
-//! 判断通知投递的 [`SubscriptionExpr`]。
+//! 连接层只调用不做 I/O 的部分：主连接的 FIFO 对应器 [`ControlCore`] 与按服务端规则判断通知投递的
+//! [`SubscriptionExpr`]。
 
 #![deny(
     clippy::indexing_slicing,
@@ -27,14 +31,21 @@
     clippy::panic
 )]
 
+mod client;
 mod state;
 mod status;
+mod stream;
 mod sub;
+mod subscription;
+mod transfer;
 mod url;
 
-pub use state::{ControlCore, DisconnectReason, ReplyRx, StreamCore, StreamEvent};
+pub use client::{Client, Handle, Transaction};
+pub use state::{ControlCore, DisconnectReason, ReplyRx};
 pub use status::Status;
+pub use stream::StreamHandle;
 pub use sub::{SubExprError, SubscriptionExpr};
+pub use subscription::{Listener, Notice, Subscription};
 pub use url::{url_decode, url_encode};
 
 use bytes::{Buf, Bytes};

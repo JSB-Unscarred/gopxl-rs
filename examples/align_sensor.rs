@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use common::{ALIGNED, ALIGNING, SCANNER_PATH, SENSOR_PATH, UNALIGNED};
-use gopxl::value::Value;
+use gopxl::Value;
 
 fn main() -> common::Result {
     let system = common::connect()?;
@@ -38,10 +38,9 @@ fn main() -> common::Result {
     // align 的应答可能在对准完成之前返回（协议手册），所以每秒读一次 alignState，直到不再是“对准中”。
     let state = loop {
         thread::sleep(Duration::from_secs(1));
-        let alignment = client.read(&alignment_path).response()?.payload;
-        let state = alignment["alignState"]
+        let state = common::read_at(client, &alignment_path, "/alignState")?
             .as_i64()
-            .ok_or("alignment has no \"alignState\"")?;
+            .ok_or("alignState is not an integer")?;
         if state != ALIGNING {
             break state;
         }
@@ -52,7 +51,6 @@ fn main() -> common::Result {
         _ => return Err(format!("unknown alignment state {state}").into()),
     };
     println!("Alignment state: {label}");
-    client.read(&alignment_path).response()?;
 
     if state == UNALIGNED {
         println!("Alignment failed. Check alignment configuration on sensor.");

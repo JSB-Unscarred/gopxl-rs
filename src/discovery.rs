@@ -11,7 +11,7 @@
 //! | 24 | — | `i64` 状态：1，或 −992 表示服务端截断了某个字段 |
 //! | 32 | — | 紧凑 JSON 对象，以 NUL 结尾，最长 1504 字节 |
 //!
-//! 数据报来自网络，[`parse_announce`] 用以下约定修掉 C++ SDK 的缺陷（重写方案 §5.4 第 28 条）：
+//! 数据报来自网络，[`parse_announce`] 用以下约定修掉 C++ SDK 的缺陷：
 //! - 只解析收到的字节：JSON 取到第一个 NUL 或数据报末尾，1537 字节的 Announce 在 1536 字节的缓冲区里丢掉 NUL 后，
 //!   C++ 会越界读取；Length 字段与两个 SDK 一样不校验；
 //! - 读取都经过 `bytes::Buf` 的 `try_get_*`，下面的 lint 禁止下标与 unwrap，坏报文只得到 `Err`；
@@ -92,26 +92,13 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// 能否作为 GoPxL 服务端连接：GoPxL 实例、未被远程控制、地址与控制端口有效（SDK 示例 `Discover.cpp` 的判断）。
-    pub fn is_connectable(&self) -> bool {
-        !self.classic && !self.is_remote && self.address.is_some() && self.control_port != 0
-    }
-
-    /// 控制通道地址，[`is_connectable`](Self::is_connectable) 时为 `Some`。
+    /// 控制通道地址；能作为 GoPxL 服务端连接（GoPxL 实例、未被远程控制、地址与控制端口有效，SDK 示例
+    /// `Discover.cpp` 的判断）时为 `Some`。
     pub fn control_addr(&self) -> Option<SocketAddrV4> {
-        self.socket_addr(self.control_port)
-    }
-
-    /// GDP 通道地址，可连接且 `gdp_port != 0` 时为 `Some`。
-    pub fn gdp_addr(&self) -> Option<SocketAddrV4> {
-        self.socket_addr(self.gdp_port)
-    }
-
-    fn socket_addr(&self, port: u16) -> Option<SocketAddrV4> {
-        if port == 0 || !self.is_connectable() {
+        if self.classic || self.is_remote || self.control_port == 0 {
             return None;
         }
-        Some(SocketAddrV4::new(self.address?, port))
+        Some(SocketAddrV4::new(self.address?, self.control_port))
     }
 }
 

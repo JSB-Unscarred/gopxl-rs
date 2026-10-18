@@ -33,8 +33,8 @@
 //! - [`FrameReader`](crate::frame::FrameReader) 为每帧按长度精确分配一块内存，返回的 `Bytes` 独占它；解码出的
 //!   零拷贝切片（`Value::Bin`、GDP 的强度、图像像素、Mesh 字节通道与未知类型的消息体）只让自己所在的帧存活。
 //!   GDP 的多字节数组（`i16`、`f32` …）解码为自有的 `Vec`，不引用帧。
-//! - [`ControlCore`](crate::control::ControlCore) 拥有每个已写出、未应答请求的应答发送端；`register` 建立
-//!   `sync_channel(1)`，把接收端（[`ReplyRx`](crate::control::ReplyRx)）交给调用方。调用方超时即丢弃接收端：槽位
+//! - `ControlCore`（crate 内部） 拥有每个已写出、未应答请求的应答发送端；`register` 建立
+//!   `sync_channel(1)`，把接收端（`ReplyRx`）交给调用方。调用方超时即丢弃接收端：槽位
 //!   成为墓碑，仍按 FIFO 吸收迟到的响应，不从队列中删除（删除会让后面的响应全部错位）。每个槽位只发送一次：
 //!   响应到达时，或拆连接时由 `fail_all` 以断开原因完成，所以读线程持锁发送时从不阻塞。
 //! - [`SubscriptionExpr`](crate::control::SubscriptionExpr) 只持有编译好的正则，不引用连接。
@@ -52,19 +52,17 @@
 //!   `Resource` 各有各的缓存，`children` 等得到的子资源同样是独立的值。缓存在访问时判断是否过期，不需要线程或回调：
 //!   连接的写计数变了（`create` / `update` / `delete` / `call` 在写锁内加一，文件传输在完成后加一；资源记下读取之前的
 //!   计数）、连接已断开，或订阅队列中有通知（订阅 `<路径>/*`）。C++ 用回调把管理器中的资源标脏，回调捕获裸 `this`、
-//!   写钩子只有一个槽位（重写方案 §5.4 第 38 条）。
+//!   写钩子只有一个槽位。
 //! - [`Transaction`](crate::control::Transaction) 拥有一个已写出请求的应答接收端，丢弃即 fire-and-forget。
-//! - [`Subscription`](crate::control::Subscription) 拥有自己的通知队列与一份租约；读线程只持队列的 `Weak`。
-//!   同一表达式的租约计数归零（最后一个订阅 Drop）时写出 `unSub`，不等应答。
-//!   [`Listener`](crate::control::Listener) 拥有监听线程的停止开关，线程拥有 `Subscription`。
+//! - [`Subscription`](crate::control::Subscription) 拥有自己的通知队列；读线程只持队列的 `Weak`。Drop 时注销队列，
+//!   没有别的本地订阅用同一表达式时写出 `unSub`，不等应答。
 //! - [`StreamHandle`](crate::control::StreamHandle) 与 [`GdpClient`](crate::gdp::GdpClient) 各拥有一条连接与它的读线程；
 //!   文件传输连接只在 `transfer` 调用期间存在。
 //!
 //! ## 线程与锁
 //!
-//! - 每个 `Client` 一个读线程 `gopxl-control`，每个流一个 `gopxl-stream`，每个 `GdpClient` 一个 `gopxl-gdp`，每个
-//!   `Listener` 一个监听线程 `gopxl-listener`，主连接丢失时一个调用断开回调的线程 `gopxl-disconnect`；请求、文件传输
-//!   与发现在调用方线程上执行。
+//! - 每个 `Client` 一个读线程 `gopxl-control`，每个流一个 `gopxl-stream`，每个 `GdpClient` 一个 `gopxl-gdp`；请求、
+//!   文件传输与发现在调用方线程上执行。没有回调：通知由调用方拉取，断开由各阻塞调用以 `Disconnected` 报告。
 //! - 读线程从不执行用户代码，也从不等待主连接上的消费者：订阅队列满了丢最老的。流与 GDP 的读线程在通道满时阻塞，
 //!   背压经 TCP 传到服务端。
 //! - 主连接两把锁，顺序固定为写锁 → 分派锁：写锁覆盖登记槽位与整帧写出，槽位顺序因此等于线上顺序；读线程只取
@@ -101,8 +99,7 @@
 //!   客户端（或自己）发出的命令，不是错误报文。Announce 的单个字段缺失或类型不对时取默认值，不报错；
 //! - [`control::DisconnectReason`](crate::control::DisconnectReason)：连接必须拆掉，所有挂起的请求以同一个
 //!   `Arc` 原因失败。`Closed` 是本端关闭，`Eof` 是服务端关闭，`Read` / `Write` 是 socket 错误（写出超时可能只写了
-//!   半帧），`Decode` 是坏帧；`Desync`（响应的 `path` 与队首请求不同）说明 FIFO 已经错位，拆连接好过把响应交给
-//!   错误的调用方。流连接与 GDP 连接的断开也用它表示。挂起队列为空时到达的响应（主连接），以及流连接上应答之后
+//!   半帧），`Decode` 是坏帧。流连接与 GDP 连接的断开也用它表示。挂起队列为空时到达的响应（主连接），以及流连接上应答之后
 //!   的孤立响应不属于任何请求，与 C++ 一样丢弃，不是错误；
 //! - [`Error`](crate::Error)：连接层与门面的错误。`Connect`（建立连接失败）、`Timeout`（应答未到，槽位成为墓碑，
 //!   连接照常可用）、`Disconnected`（携带上面的原因，只能重连）、`Request`（`status` 不是 OK，携带完整响应；`status`
@@ -116,7 +113,7 @@
 //! - [`control::SubExprError`](crate::control::SubExprError)：订阅表达式含正则元字符或 NUL，或生成的正则无法编译（例如
 //!   `?`），本地无法与服务端一致地匹配，不发送；
 //! - schema：[`schema_for_path`](crate::schema::schema_for_path) 找不到路径时为 `None`，表示“不约束”；
-//!   [`validate`](crate::schema::validate) 返回 [`Issue`](crate::schema::Issue) 列表，空表即通过。校验只是建议性的，
+//!   [`validate`](crate::schema::validate) 返回被违反的关键字与界限的列表，空表即通过。校验只是建议性的，
 //!   服务端才是裁判。
 //!
 //! ## 未经真机验证的协议假设
@@ -124,35 +121,32 @@
 //! 协议事实来自手册（manual）、两个 SDK 的源码（sdk-code）与服务端二进制的静态分析（static-binary），尚未在设备上
 //! 确认。C++ SDK 已用于生产，与它行为相同的部分不列；这里只列本 crate 与 C++ 不同的假设，每条给出推翻时的现象与
 //! 改法。“暴露”是在真机上会因它失败的示例，有设备后运行全部示例即验证了这些条目；示例覆盖不到的写“手动”检查方法。
-//! 括号内是重写方案 §9.2 的问题编号，未注明依据的条目来自 static-binary；依赖这些假设的代码在注释中引用条目编号。
+//! 未注明依据的条目来自 static-binary；依赖这些假设的代码在注释中引用条目编号。
 //!
 //! 控制通道：
 //!
-//! - **C1** 非 `create` 请求的响应带 `path` 时，按路由规则与请求路径相同（OQ-01）。C++ 不比较；这里不同即以
-//!   `Desync` 拆连接，服务端内部请求（如 notification）失败产生的孤立响应遇到挂起的请求时也这样检测（OQ-58）。
-//!   推翻时该方法像 `create` 一样不比较。暴露：`configure_tool`（`extId=` 路径）、`multi_sensor_layout`
-//!   （`delete`）、`resource_subscriptions`（`sub`）报 `response path … does not match`。
-//! - **C2** 服务端读取一帧时不会停顿 10 s 以上。C++ 不设写超时；这里 10 s 内写不出字节即拆连接，阻塞的写出（包括
+//! - **C1** 服务端读取一帧时不会停顿 10 s 以上。C++ 不设写超时；这里 10 s 内写不出字节即拆连接，阻塞的写出（包括
 //!   `Subscription` Drop 时的 `unSub`）因此有上限。推翻时去掉写超时，死连接交给 keepalive 与 TCP 重传。手动：上传
 //!   期间让服务端暂停 15 s，Linux 客户端报 `Write(TimedOut)`（Windows 回环上整帧一次交给内核，不触发）。
-//! - **C3** 服务端读到 FIN 后随即关闭连接。Windows 上读线程靠它退出（见“所有权”）；C++ 先 join 再关闭 socket。
+//! - **C2** 服务端读到 FIN 后随即关闭连接。Windows 上读线程靠它退出（见“所有权”）；C++ 先 join 再关闭 socket。
 //!   推翻时读线程改为带超时地等待可读。手动：循环 connect 与 drop，观察线程数是否增长。
 //!
 //! 订阅：
 //!
 //! - **S1** 同一表达式重复 `sub` 无害，服务端删掉同文本的旧条目再追加。C++ 对同一路径只发一次；这里每个
-//!   `subscribe` 都发。推翻时租约从 0 变 1 才发。手动：对 `/system` 订阅两次，两个都应收到通知，`listSub` 只列一条。
-//! - **S2** 服务端对 `created` / `updated` / `deleted` 只按 R 正则投递，对 `embeddedUpdated` 只按 E（OQ-13）。这里按
+//!   `subscribe` 都发。推翻时只在该表达式没有别的本地订阅时才发。手动：对 `/system` 订阅两次，两个都应收到通知，
+//!   `listSub` 只列一条。
+//! - **S2** 服务端对 `created` / `updated` / `deleted` 只按 R 正则投递，对 `embeddedUpdated` 只按 E。这里按
 //!   同一规则把通知分给订阅；C++ 另有接收全部通知的全局回调，并按祖先回溯分派。推翻时按观察到的规则修改
 //!   `SubscriptionExpr::delivers`。手动：`subscribe("/tools")` 后新建 tool，线上出现 `created /tools/<id>` 而订阅
 //!   取不到即推翻。
-//! - **S3** `sub <路径>/*` 的 `*` 是通配，投递路径本身与全部后代；`unSub` 只删除文本相同的那一条（OQ-13、OQ-14）。
+//! - **S3** `sub <路径>/*` 的 `*` 是通配，投递路径本身与全部后代；`unSub` 只删除文本相同的那一条。
 //!   `Resource::subscribe` 依赖它，C++ 订阅精确路径。推翻时改为订阅精确路径。手动：一条连接订阅资源，另一条连接
 //!   修改它，前者的 `has_remote_changes()` 应变为 `true`。
 //!
 //! 流与文件传输：
 //!
-//! - **T1** 同一客户端可以同时保持主连接、每个流一条连接与文件传输的临时连接（OQ-59）。C++ 全部走一条连接。推翻时
+//! - **T1** 同一客户端可以同时保持主连接、每个流一条连接与文件传输的临时连接。C++ 全部走一条连接。推翻时
 //!   多个流共用一条连接，文件传输改走主连接。暴露：`receive_metrics`（3 条流连接）、`backup_restore`、`save_job`、
 //!   `replay_data`、`system_upgrade` 报 `Connect` 或 `Disconnected`。
 //! - **T2** 发出请求的连接关闭后，服务端仍把已开始的命令执行完。文件传输读到应答或超时即关闭临时连接，
@@ -162,7 +156,7 @@
 //!   在 4 条缓冲满时停止读取，C++ 从不停止。推翻时流消息改用丢最老的有界队列。手动：开流后 20 s 不取，约 10 s 后应
 //!   得到 `Disconnected`，另一个客户端的流不受影响。
 //! - **T4** `/dataSources` 流的每条数据是一个 `bin`，内容是与 GDP-TCP 逐字节相同的完整 GDP 消息，表面强度的行宽
-//!   规则也相同（OQ-34）。C++ 不解码流载荷，[`gdp::decode_all`](crate::gdp::decode_all) 依赖它。推翻时按抓包调整
+//!   规则也相同。C++ 不解码流载荷，[`gdp::decode_all`](crate::gdp::decode_all) 依赖它。推翻时按抓包调整
 //!   `decode_all` 的切分与强度行宽。手动：同一数据源经 `GdpClient` 与流各收一次，比较解码结果。
 //!
 //! GDP：
@@ -179,8 +173,8 @@
 //! - **D1**（sdk-code）Gocator 6.x 经典设备把回复发往 UDP 3220，而非命令的源端口：两个 SDK 的发送 socket 都绑定
 //!   3220，这里的绑定临时端口。推翻时经典命令改从绑定 3220 的 socket 发出。手动：对 6.x 设备比较
 //!   `discover(_, true)` 与 C++ 的结果。
-//! - **D2** 本机 GoPxL 能收到经物理网卡发出的受限广播，不需要从回环接口再发（OQ-49）。两个 SDK 也从 127.0.0.1
-//!   发送。推翻时不再跳过回环接口（承担 OQ-49 中锁定网卡的风险）。暴露：在运行虚拟节点的 PC 上 `discover` 列不出
+//! - **D2** 本机 GoPxL 能收到经物理网卡发出的受限广播，不需要从回环接口再发。两个 SDK 也从 127.0.0.1
+//!   发送。推翻时不再跳过回环接口（承担锁定网卡的风险）。暴露：在运行虚拟节点的 PC 上 `discover` 列不出
 //!   本机实例。
 //!
 //! 资源：
@@ -189,6 +183,6 @@
 //!   `Resource::children` 把条目直接放进子资源的缓存；C++ 按键数判断条目是否已展开。推翻时只缓存含 `_links` 以外键
 //!   的条目。暴露：`resource_commands` 的作业文件一节报 `response payload has no valid "/jobName"`。
 //! - **R2**（manual）`create` 的响应带新资源的 `path` 或 `_links.self.href`，形如 `/tools/<id>`，末段即数据源 ID 中
-//!   的工具 ID（OQ-17）。`Resource::create_child` 与 `resource_configure_tool` 依赖它；C++ 示例写死数据源 ID。推翻时
+//!   的工具 ID。`Resource::create_child` 与 `resource_configure_tool` 依赖它；C++ 示例写死数据源 ID。推翻时
 //!   按响应形态修改 `create_child`，示例改读输出的 `dataSourceId`。暴露：`resource_configure_tool` 报 `Payload`，或
 //!   之后收不到测量值。

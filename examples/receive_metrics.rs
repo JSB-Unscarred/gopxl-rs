@@ -11,8 +11,8 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
+use gopxl::Value;
 use gopxl::control::StreamMessage;
-use gopxl::value::Value;
 
 /// 每个流每轮等待第一条消息的时长：三个流轮流等待，它决定按下 Enter 之后多久退出。
 const POLL: Duration = Duration::from_millis(100);

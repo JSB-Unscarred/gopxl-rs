@@ -3,8 +3,7 @@
 //! [`Handle::open_stream`] 对同一台设备再开一条控制连接，只写出一个 `stream` 请求；之后读线程 `gopxl-stream` 把
 //! 流消息放进有界通道，[`StreamHandle`] Drop 即关闭连接（服务端在连接关闭时清理流），从不发 `cancelStream`。
 //! 这样主连接上没有流：流结束与 `cancelStream` 竞争产生的孤立响应、`removeStream` / `streamStart` 失败的孤立
-//! 响应都只会出现在这条连接上，应答之后的响应一律忽略；C++ 把它们当作下一个请求的应答，此后全部错位（重写方案
-//! §5.4 第 18、19、42 条）。
+//! 响应都只会出现在这条连接上，应答之后的响应一律忽略；C++ 把它们当作下一个请求的应答，此后全部错位。
 
 use std::convert::Infallible;
 use std::io::{BufReader, Write};
@@ -13,9 +12,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use super::client::{CONNECT_TIMEOUT, Handle, encode, with_payload};
-use super::{DisconnectReason, HEADER_LEN, Inbound, Method, Response, StreamMessage};
-use crate::error::{self, Error, Result};
+use super::client::{CONNECT_TIMEOUT, Handle, Transaction, encode};
+use super::{DisconnectReason, HEADER_LEN, Inbound, Method, Reply, Request, StreamMessage};
+use crate::error::{Error, Result};
 use crate::frame::FrameReader;
 use crate::net::{self, Link, MAX_FRAME};
 use crate::value::Value;
@@ -40,7 +39,7 @@ impl Handle {
     /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。每个流一条连接是协议
     /// 假设 T1。
     pub fn open_stream(&self, path: &str, payload: impl Into<Value>) -> Result<StreamHandle> {
-        let request = with_payload(Method::Stream, path, payload);
+        let request = Request::with_payload(Method::Stream, path, payload);
         let frame = encode(&request)?;
         let socket = net::connect(self.addr(), CONNECT_TIMEOUT)?;
         // 写出失败时 socket 随返回关闭。
@@ -55,8 +54,10 @@ impl Handle {
             .name("gopxl-stream".into())
             .spawn(move || {
                 let Err(reason) = read_stream(&reader, &reply_tx, &message_tx);
-                // 先记下原因再丢弃发送端，句柄看到通道断开时总能取到原因。
-                reader.finish(reason);
+                // 应答之前就断开时让 open_stream 拿到原因；应答已发出时槽位已满，忽略。
+                if let Some(reason) = reader.finish(reason) {
+                    let _ = reply_tx.try_send(Err(Arc::clone(reason)));
+                }
             })
             .map_err(|source| Error::Connect {
                 addr: self.addr(),
@@ -64,19 +65,9 @@ impl Handle {
             })?;
         // 从这里起任何错误都经 Drop 关闭连接。
         let stream = StreamHandle { link, messages };
-        match reply.recv_timeout(OPEN_TIMEOUT) {
-            Ok(response) => error::check(request.method, request.path, response)?,
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(Error::Timeout {
-                    method: request.method,
-                    path: request.path,
-                    after: OPEN_TIMEOUT,
-                });
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(Error::Disconnected(stream.link.disconnected()));
-            }
-        };
+        Transaction::new(Ok(reply), request)
+            .timeout(OPEN_TIMEOUT)
+            .response()?;
         Ok(stream)
     }
 }
@@ -111,11 +102,10 @@ impl Drop for StreamHandle {
 /// 返回时它们排在最前面。应答之后的响应是孤立响应，与通知、未知 `type` 一起忽略。
 fn read_stream(
     link: &Link,
-    reply: &SyncSender<Response>,
+    reply: &SyncSender<Reply>,
     messages: &SyncSender<StreamMessage>,
 ) -> std::result::Result<Infallible, DisconnectReason> {
     let mut frames = FrameReader::new(HEADER_LEN, MAX_FRAME);
-    // metrics 是小帧：每帧至少两次 read，经缓冲合并；大帧的帧体绕过缓冲直接读入。
     let mut socket = BufReader::new(&link.socket);
     // 应答之前到达的流消息；`None` 表示已经应答。
     let mut early = Some(Vec::new());
@@ -124,7 +114,9 @@ fn read_stream(
         match Inbound::decode(frame)? {
             Inbound::Response(response) => {
                 if let Some(early) = early.take() {
-                    reply.send(response).map_err(|_| DisconnectReason::Closed)?;
+                    reply
+                        .send(Ok(response))
+                        .map_err(|_| DisconnectReason::Closed)?;
                     for message in early {
                         messages
                             .send(message)
@@ -138,7 +130,7 @@ fn read_stream(
                     .send(message)
                     .map_err(|_| DisconnectReason::Closed)?,
             },
-            Inbound::Notification(_) | Inbound::Other(_) => {}
+            Inbound::Notification(_) | Inbound::Other => {}
         }
     }
 }

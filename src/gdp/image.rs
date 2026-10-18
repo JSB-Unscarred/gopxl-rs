@@ -28,7 +28,7 @@ pub struct Image {
     /// 转置（C++ `ColumnBased`），在翻转之后应用。
     pub transposed: bool,
     /// X、Y 分辨率（mm），1.3 新增：属性段内剩余 ≥ 32 字节才与 `offset` 一起读取，否则为 `None`
-    /// （C++ 剩 1 字节就读，越过段尾，重写方案 §5.4 第 26 条）。
+    /// （C++ 剩 1 字节就读，越过段尾）。
     pub scale: Option<[f64; 2]>,
     /// X、Y 偏移（mm），1.3 新增，与 `scale` 同时出现。
     pub offset: Option<[f64; 2]>,
@@ -151,7 +151,7 @@ macro_rules! pixel_formats {
     };
 }
 
-// 数值取自 C++ 头文件，不取注释：BayerXX16 是 PFNC 的 0x0110002E 起（.NET 误用 12 位，重写方案 §5.4 第 25 条）。
+// 数值取自 C++ 头文件，不取注释：BayerXX16 是 PFNC 的 0x0110002E 起（.NET 误用 12 位）。
 pixel_formats! {
     NULL = 0 => "Null",
     GREYSCALE_8BPP = 1 => "Greyscale_8BPP",

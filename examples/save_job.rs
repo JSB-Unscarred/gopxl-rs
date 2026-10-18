@@ -64,10 +64,7 @@ fn main() -> common::Result {
         upload["name"],
         job_file.display()
     );
-    let create = Request {
-        payload: upload,
-        ..Request::new(Method::Create, JOB_FILES_PATH)
-    };
+    let create = Request::with_payload(Method::Create, JOB_FILES_PATH, upload);
     client.transfer(create, UPLOAD_TIMEOUT)?;
 
     let load = r#"{"name":"SDK-local-job-demo"}"#.parse::<Value>()?;

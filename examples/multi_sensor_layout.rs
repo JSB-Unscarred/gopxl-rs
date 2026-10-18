@@ -11,7 +11,7 @@
 
 mod common;
 
-use gopxl::value::Value;
+use gopxl::Value;
 
 const SENSOR_2_SERIAL_NO: &str = "62984";
 

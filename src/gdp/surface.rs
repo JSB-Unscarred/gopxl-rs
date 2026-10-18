@@ -91,7 +91,7 @@ impl SurfaceAttrs {
     /// 紧跟点数组的 iL 行强度。每块数据只检查 `剩余 ≥ 需要`，与 GDP-TCP 的 SDK 规则相同。
     fn take_intensity(&self, buf: &mut Bytes) -> Result<Bytes, GdpError> {
         let len = product(self.intensity_length as usize, self.intensity_row_size())?;
-        take(buf, len)
+        Ok(take(buf, len)?)
     }
 }
 

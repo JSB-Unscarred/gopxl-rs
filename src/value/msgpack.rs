@@ -6,7 +6,7 @@
 //!
 //! 解码的输入来自网络，以下约定保证坏帧只会得到 `Err`：
 //! - 嵌套深度上限 [`MAX_DEPTH`]，递归不会栈溢出（栈溢出直接终止进程）；
-//! - 数组不按声明的元素数预分配，声明 2³²−1 个元素的坏帧不会触发巨量分配；
+//! - 数组的预分配不超过剩余字节数，声明 2³²−1 个元素的坏帧不会触发巨量分配；
 //! - 读取都经过 `bytes::Buf` 的 `try_get_*` 与带长度检查的 `take`，下面的 lint 禁止下标与 unwrap，
 //!   读线程不会因为坏帧 panic。
 
@@ -20,13 +20,14 @@
 use bytes::{Buf, Bytes, TryGetError};
 
 use super::{Map, Value};
+use crate::frame::take;
 
 /// 解码允许的最大嵌套层数，与 `serde_json` 的递归上限相同。
 pub const MAX_DEPTH: usize = 128;
 
 /// [`encode`] 的错误：字符串、二进制、数组或对象的长度超过 `u32::MAX`，MessagePack 无法表示。
 ///
-/// nlohmann 在这种情况下会写出没有长度头的坏流（重写方案 §5.4 第 21 条）。
+/// nlohmann 在这种情况下会写出没有长度头的坏流。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("MessagePack length exceeds u32::MAX")]
 pub struct EncodeError;
@@ -130,7 +131,7 @@ fn write_negative(out: &mut Vec<u8>, v: i64) {
     }
 }
 
-pub(crate) fn write_str(out: &mut Vec<u8>, v: &str) -> Result<(), EncodeError> {
+fn write_str(out: &mut Vec<u8>, v: &str) -> Result<(), EncodeError> {
     write_len(out, &STR, v.len())?;
     out.extend_from_slice(v.as_bytes());
     Ok(())
@@ -261,15 +262,6 @@ fn read_len(buf: &mut Bytes, width: usize) -> Result<usize, DecodeError> {
     Ok(usize::try_from(buf.try_get_uint(width)?).unwrap_or(usize::MAX))
 }
 
-/// 取出 `n` 字节的零拷贝切片。
-fn take(buf: &mut Bytes, n: usize) -> Result<Bytes, DecodeError> {
-    if n <= buf.len() {
-        Ok(buf.split_to(n))
-    } else {
-        Err(DecodeError::Truncated)
-    }
-}
-
 fn read_str(buf: &mut Bytes, n: usize) -> Result<Value, DecodeError> {
     Ok(Value::Str(
         String::from_utf8_lossy(&take(buf, n)?).into_owned(),
@@ -278,7 +270,8 @@ fn read_str(buf: &mut Bytes, n: usize) -> Result<Value, DecodeError> {
 
 fn read_array(buf: &mut Bytes, n: usize, depth: usize) -> Result<Value, DecodeError> {
     let depth = enter(depth)?;
-    let mut items = Vec::new();
+    // 每个元素至少 1 字节，剩余字节数是安全的预分配上界。
+    let mut items = Vec::with_capacity(n.min(buf.remaining()));
     for _ in 0..n {
         items.push(read_value(buf, depth)?);
     }
@@ -318,7 +311,7 @@ mod tests {
     }
 
     // 内存安全约定：深度上限内的嵌套可以解码，超过一层即报错；声明巨大长度的短输入报 Truncated，不预分配。
-    // 保留原因：lint 只禁止 panic，拦不住递归栈溢出与按网络输入分配巨量内存。
+    // lint 只禁止 panic，拦不住递归栈溢出与按网络输入分配巨量内存。
     #[test]
     fn decode_rejects_depth_and_length_bombs() {
         let nested = |levels: usize| {

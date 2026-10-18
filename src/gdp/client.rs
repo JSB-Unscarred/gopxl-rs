@@ -2,7 +2,7 @@
 //! 按 `is_last_msg` 组集。对应 C++ 的 `GoGdpClient`。
 //!
 //! 读线程与消费者之间是容量很小的有界通道：不调用 `receive` 时读线程阻塞，TCP 背压传到服务端，由服务端丢弃数据
-//! （计入 `controlDrops`），与 C++ 的同步接收一样本地不积压。C++ 的异步队列无界（重写方案 §5.4 第 24 条）。
+//! （计入 `controlDrops`），与 C++ 的同步接收一样本地不积压。C++ 的异步队列无界。
 //! socket 不设读超时：Windows 上 `SO_RCVTIMEO` 超时之后 socket 状态不确定，可能丢失字节，GDP 流随之错位。
 
 use std::convert::Infallible;
@@ -69,7 +69,6 @@ impl GdpClient {
             .name("gopxl-gdp".into())
             .spawn(move || {
                 let Err(reason) = read_messages(&reader, &tx);
-                // 先记下原因再丢弃发送端，句柄看到通道断开时总能取到原因。
                 reader.finish(reason);
             })
             .map_err(|source| Error::Connect { addr, source })?;
@@ -133,7 +132,6 @@ fn read_messages(
     messages: &SyncSender<Message>,
 ) -> std::result::Result<Infallible, DisconnectReason> {
     let mut frames = FrameReader::new(HEADER_LEN, MAX_FRAME);
-    // 小消息多：每条消息至少两次 read（长度与消息体），经缓冲合并。
     let mut socket = BufReader::new(&link.socket);
     loop {
         let frame = frames.read(&mut socket)?.ok_or(DisconnectReason::Eof)?;

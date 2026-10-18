@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::control::{DisconnectReason, Method, Response};
-use crate::schema::Issue;
 
 /// 本 crate 连接层的 `Result`。
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -52,14 +51,14 @@ pub enum Error {
     },
     /// 资源开启了校验（[`Resource::set_validation`](crate::resource::Resource::set_validation)），补丁中 `pointer` 处的值不符合
     /// schema，请求没有发出，对应 C++ 的 `GoResourceValidationError`。
-    #[error("{path}: {pointer:?} fails schema validation: {}", list(issues))]
+    #[error("{path}: {pointer:?} violates {}", issues.join("; "))]
     Validation {
         /// 资源路径。
         path: String,
         /// 补丁中不合格的值的 JSON Pointer。
         pointer: String,
-        /// 发现的问题，非空。
-        issues: Vec<Issue>,
+        /// 被违反的关键字与界限（见 [`schema::validate`](crate::schema::validate)），非空。
+        issues: Vec<String>,
     },
     /// 参数无法发送：端口为 0、帧超过 4 GiB、主连接上的 `stream` / `cancelStream`、无法匹配的订阅表达式。
     #[error("invalid argument: {0}")]
@@ -107,10 +106,4 @@ pub(crate) fn check(method: Method, path: String, response: Response) -> Result<
             response,
         })))
     }
-}
-
-/// `Validation` 的 `Display`：各问题以 `; ` 分隔。
-fn list(issues: &[Issue]) -> String {
-    let issues: Vec<_> = issues.iter().map(Issue::to_string).collect();
-    issues.join("; ")
 }

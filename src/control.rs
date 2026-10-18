@@ -18,11 +18,11 @@
 //! 服务端从不产生的输入一律是坏帧，[`Inbound::decode`] 返回 `Err`，由连接层拆掉连接：类型不是 0xB000、
 //! `DataLength` 超出帧、消息体不是 MessagePack 对象，或缺少 / 类型错误的必需字段（包括 response 的 `status`）。
 //! C++ SDK 在 `DataLength` 越界时读进下一帧而错位；其余情况报读错误并丢弃该消息，等待中的请求不会失败，FIFO
-//! 随之错位；缺少 `status` 的响应被当作成功（重写方案 §5.4 第 6、7 条）。`CarrierStatus` 与 C++ 一样不检查：
+//! 随之错位；缺少 `status` 的响应被当作成功。`CarrierStatus` 与 C++ 一样不检查：
 //! 内存不足等错误路径上的带帧错误响应照常交给它的请求。
 //! 未知的 `type`（如 `debug`）得到 [`Inbound::Other`] 由调用方忽略；C++ 把它当作响应，会错配等待中的请求。
 //!
-//! 连接层只调用不做 I/O 的部分：主连接的 FIFO 对应器 [`ControlCore`] 与按服务端规则判断通知投递的
+//! 连接层只调用不做 I/O 的部分：主连接的 FIFO 对应器 `ControlCore`（crate 内部）与按服务端规则判断通知投递的
 //! [`SubscriptionExpr`]。
 
 #![deny(
@@ -42,16 +42,17 @@ mod transfer;
 mod url;
 
 pub use client::{Client, Handle, Transaction};
-pub use state::{ControlCore, DisconnectReason, ReplyRx};
+pub use state::DisconnectReason;
+use state::{ControlCore, Reply, ReplyRx};
 pub use status::Status;
 pub use stream::StreamHandle;
 pub use sub::{SubExprError, SubscriptionExpr};
-pub use subscription::{Listener, Notice, Subscription};
+pub use subscription::{Notice, Subscription};
 pub use url::{url_decode, url_encode};
 
 use bytes::{Buf, Bytes};
 
-use crate::value::msgpack::{self, DecodeError, EncodeError, write_str};
+use crate::value::msgpack::{self, DecodeError, EncodeError};
 use crate::value::{Map, Value};
 
 /// 控制通道的默认端口（`GO_PXL_SDK_DEFAULT_CONTROL_PORT`）。
@@ -96,8 +97,7 @@ pub enum Method {
 }
 
 impl Method {
-    /// 线上的方法名。拼写与服务端一致（`unSub`、`cancelStream` …）；.NET SDK 发送全小写的名字，服务端回复 −997
-    /// （重写方案 §5.4 第 9 条）。
+    /// 线上的方法名。拼写与服务端一致（`unSub`、`cancelStream` …）；.NET SDK 发送全小写的名字，服务端回复 −997。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
@@ -140,18 +140,34 @@ impl Request {
         }
     }
 
-    /// 把整帧（carrier 头与消息体）追加到 `out`，对应 `GoRequest::ToByteArray` 加上 carrier 头。
-    ///
-    /// 消息体与 C++ SDK 逐字节一致：4 个键按字节序 `args`、`method`、`path`、`payload` 直接写出，不克隆载荷。
+    /// 带载荷的请求：`update` 的补丁、`create` 与 `call` 的参数、`stream` 的 `period`，或文件传输的 `bin`。
+    pub fn with_payload(
+        method: Method,
+        path: impl Into<String>,
+        payload: impl Into<Value>,
+    ) -> Self {
+        Self {
+            payload: payload.into(),
+            ..Self::new(method, path)
+        }
+    }
+
+    /// 把整帧（carrier 头与消息体）追加到 `out`，对应 `GoRequest::ToByteArray` 加上 carrier 头。消息体是
+    /// `{args, method, path, payload}`（`Map` 按键排序，与 C++ SDK 的字节相同；克隆 `Bin` 只增加引用计数）。
     /// `Length` 超过 `u32::MAX` 时返回 `EncodeError` 并把 `out` 恢复到原长度：C++ 先写出截断的长度再报错，
-    /// 字节流随之错位（重写方案 §5.4 第 21 条）。
+    /// 字节流随之错位。
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+        let body = Value::Map(Map::from([
+            ("args".to_owned(), self.args.clone()),
+            ("method".to_owned(), Value::from(self.method.as_str())),
+            ("path".to_owned(), Value::from(self.path.as_str())),
+            ("payload".to_owned(), self.payload.clone()),
+        ]));
         let start = out.len();
         let header = start..start + REQUEST_HEADER_LEN as usize;
         // 帧头占位，消息体写完后回填。
         out.extend_from_slice(&[0; REQUEST_HEADER_LEN as usize]);
-        let len = self
-            .write_body(out)
+        let len = msgpack::encode(&body, out)
             .and_then(|()| u32::try_from(out.len() - start).map_err(|_| EncodeError));
         match len {
             Ok(len) => {
@@ -165,19 +181,6 @@ impl Request {
                 Err(e)
             }
         }
-    }
-
-    /// 消息体：4 个键的对象，键按字节序写出（与 nlohmann 的 `std::map` 相同）。
-    fn write_body(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
-        out.push(0x84);
-        write_str(out, "args")?;
-        msgpack::encode(&self.args, out)?;
-        write_str(out, "method")?;
-        write_str(out, self.method.as_str())?;
-        write_str(out, "path")?;
-        write_str(out, &self.path)?;
-        write_str(out, "payload")?;
-        msgpack::encode(&self.payload, out)
     }
 }
 
@@ -214,7 +217,7 @@ pub enum EventType {
     Deleted,
     /// `embeddedUpdated`：嵌入的子资源发生变化。
     EmbeddedUpdated,
-    /// 其他字符串（服务端对非法枚举值写 `"Unknown"`）。C++ 把它们当作 `Updated`（重写方案 §5.4 第 11 条）。
+    /// 其他字符串（服务端对非法枚举值写 `"Unknown"`）。C++ 把它们当作 `Updated`。
     Other(String),
 }
 
@@ -280,8 +283,8 @@ pub enum Inbound {
     Notification(Notification),
     /// `stream`。
     Stream(StreamMessage),
-    /// 未知的 `type`（例如隐藏调试命令打开的 `debug`），携带该字符串，由调用方忽略。
-    Other(String),
+    /// 未知的 `type`（例如隐藏调试命令打开的 `debug`），由调用方忽略。
+    Other,
 }
 
 impl Inbound {
@@ -319,7 +322,7 @@ impl Inbound {
                 path: take_str(&mut msg, "path")?,
                 payload,
             }),
-            _ => Self::Other(ty),
+            _ => Self::Other,
         })
     }
 }

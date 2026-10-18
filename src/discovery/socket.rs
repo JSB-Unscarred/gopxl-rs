@@ -1,7 +1,7 @@
 //! UDP 发现的 socket 部分：[`discover`] 在调用方线程上广播命令、收集回复，对应 C++ 的
 //! `GoDiscoveryClient::BlockingDiscover`。
 //!
-//! 修掉 C++ 的问题（重写方案 §5.4 第 29–31 条）：单个网卡发送失败不影响其他网卡；接收缓冲 2048 字节，大于
+//! 修掉 C++ 的问题：单个网卡发送失败不影响其他网卡；接收缓冲 2048 字节，大于
 //! 服务端最长的 1536 字节回复；Discover 按 0、300、1000 ms 重发，UDP 丢一个包不会漏掉设备；每次调用都是全新的状态。
 
 use std::io;
@@ -81,11 +81,10 @@ pub fn discover(timeout: Duration, classic: bool) -> io::Result<Vec<Instance>> {
     Ok(instances)
 }
 
-/// 绑定 `0.0.0.0:port` 的接收 socket。命令与回复都广播到这个端口。
+/// 绑定 `0.0.0.0:port` 的接收 socket。命令与回复都广播到这个端口；只收不发，不需要 `SO_BROADCAST`。
 fn receiver(port: u16) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
-    socket.set_broadcast(true)?;
     socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
     Ok(socket.into())
 }

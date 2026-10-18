@@ -7,11 +7,11 @@
 //! - 锁的顺序固定为写锁 → 分派锁。读线程只取分派锁：服务端停止读取、写出被阻塞时读线程照常读，否则双方都在写、
 //!   都不读；读线程也从不等待消费者（订阅队列满了丢最老的），服务端的 10 s 写超时会断开读得慢的客户端。
 //!
-//! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown、所有挂起的请求以同一个原因失败、关闭订阅队列、
-//! 调用断开回调。读错误、EOF、坏帧、FIFO 错位、写失败与 `Client` 的 Drop 都走这里，不依赖读线程醒来（见
-//! `Link`）。C++ 读错误时不让挂起的请求失败，EOF 时忙等，`IsConnected` 一直为真（重写方案 §5.4 第 2、4 条）。
+//! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown、所有挂起的请求以同一个原因失败、关闭订阅队列。
+//! 读错误、EOF、坏帧、写失败与 `Client` 的 Drop 都走这里，不依赖读线程醒来（见 `Link`）；之后
+//! [`Handle::is_connected`] 为假，每个阻塞调用都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的
+//! 请求失败，EOF 时忙等，`IsConnected` 一直为真。
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::io::{BufReader, Write};
@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -87,12 +87,7 @@ impl Deref for Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        // 本端关闭不是连接丢失，不调用断开回调（与 C++ 的 Disconnect 相同）。仍要取走并在锁外丢弃：回调若持有
-        // Handle，留在 Shared 里就是 Arc 环，连接永不释放。
-        let shared = &self.handle.shared;
-        let callback = lock(&shared.dispatch).on_disconnect.take();
-        shared.teardown(DisconnectReason::Closed);
-        drop(callback);
+        self.handle.shared.teardown(DisconnectReason::Closed);
     }
 }
 
@@ -103,53 +98,42 @@ pub struct Handle {
     pub(super) shared: Arc<Shared>,
 }
 
-/// 订阅表达式 → 本地订阅数（租约）。由写锁保护：租约变化与 `sub` / `unSub` 的写出在同一个临界区内，
-/// 线上的 `sub` / `unSub` 顺序因此与计数一致。
-pub(super) type Leases = HashMap<String, usize>;
-
-/// 断开回调，见 [`Handle::on_disconnect`]。
-type DisconnectCallback = Box<dyn FnOnce(&DisconnectReason) + Send>;
-
 /// 连接的共享状态，由 `Handle`（经 `Arc`）与读线程共同持有。
 pub(super) struct Shared {
     addr: SocketAddr,
     pub(super) link: Link,
-    /// 写锁：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序。
-    pub(super) writer: Mutex<Leases>,
+    /// 写锁：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在它里面。
+    pub(super) writer: Mutex<()>,
     /// 分派锁：读线程处理每一帧时持有。
     pub(super) dispatch: Mutex<Dispatch>,
     /// 经这条连接发出的变更请求数，见 [`Handle::write_count`]。
     writes: AtomicU64,
 }
 
-/// 分派锁保护的状态：读线程按帧更新 FIFO 对应器与订阅队列，拆连接在同一个临界区里取走断开回调。
+/// 分派锁保护的状态：读线程按帧更新 FIFO 对应器与订阅队列。
 #[derive(Default)]
 pub(super) struct Dispatch {
     core: ControlCore,
     /// 本地订阅的队列；`Subscription` 拥有队列，这里只持 `Weak`，Drop 时自行移除。
     pub(super) subs: Vec<Weak<SubQueue>>,
-    on_disconnect: Option<DisconnectCallback>,
 }
 
 impl Shared {
     /// 读线程：读帧、解码、分派，直到出错或 EOF，返回拆连接的原因。
     fn read_frames(&self) -> std::result::Result<Infallible, DisconnectReason> {
         let mut frames = FrameReader::new(HEADER_LEN, MAX_FRAME);
-        // 通知是小帧：每帧至少两次 read（长度与帧体），经缓冲合并；大帧的帧体绕过缓冲直接读入。
         let mut socket = BufReader::new(&self.link.socket);
         loop {
             let frame = frames.read(&mut socket)?.ok_or(DisconnectReason::Eof)?;
             let inbound = Inbound::decode(frame)?;
             let mut dispatch = lock(&self.dispatch);
-            if let Some(notification) = dispatch.core.on_inbound(inbound)? {
+            if let Some(notification) = dispatch.core.on_inbound(inbound) {
                 subscription::deliver(&dispatch.subs, notification);
             }
         }
     }
 
     /// 拆连接，只有第一次调用生效。shutdown 在 `fail_all` 之前：之后登记的槽位，其写出必然失败。
-    ///
-    /// 断开回调在新线程上调用：写出失败时调用方持有写锁，回调里发请求就会死锁。
     pub(super) fn teardown(&self, reason: DisconnectReason) {
         let Some(reason) = self.link.finish(reason) else {
             return;
@@ -157,15 +141,6 @@ impl Shared {
         let mut dispatch = lock(&self.dispatch);
         dispatch.core.fail_all(reason);
         subscription::close_all(&dispatch.subs);
-        let callback = dispatch.on_disconnect.take();
-        drop(dispatch);
-        if let Some(callback) = callback {
-            let reason = Arc::clone(reason);
-            // 起不了线程时回调随闭包丢弃：此时进程已无法创建线程，没有别的办法在锁外调用它。
-            let _ = thread::Builder::new()
-                .name("gopxl-disconnect".into())
-                .spawn(move || callback(&reason));
-        }
     }
 
     /// 可能改变服务端状态的请求（与 C++ 触发 `NonIdempotentRequestHandler` 的方法相同）计入写计数。
@@ -178,17 +153,17 @@ impl Shared {
         }
     }
 
-    /// 登记并写出一帧。`_writer` 是写锁内的租约表，借用它证明调用方持有写锁。
+    /// 登记并写出一帧。`_writer` 证明调用方持有写锁。
     pub(super) fn write(
         &self,
-        _writer: &mut Leases,
+        _writer: &MutexGuard<'_, ()>,
         request: &Request,
         frame: &[u8],
     ) -> Result<ReplyRx> {
-        if self.link.reason().is_some() {
-            return Err(Error::Disconnected(self.link.disconnected()));
+        if let Some(reason) = self.link.reason() {
+            return Err(Error::Disconnected(Arc::clone(reason)));
         }
-        let reply = lock(&self.dispatch).core.register(request);
+        let reply = lock(&self.dispatch).core.register();
         // 在写锁内计数，见 `Handle::write_count`。
         self.count_write(request.method);
         if let Err(error) = (&self.link.socket).write_all(frame) {
@@ -217,7 +192,7 @@ impl Handle {
     ///
     /// 写出失败时返回的 `Transaction` 立即以 `Disconnected` 完成，调用方只在 [`Transaction::response`] 处处理错误。
     /// `stream` 与 `cancelStream` 以 `InvalidArgument` 完成：流在自己的连接上（[`open_stream`](Self::open_stream)），
-    /// 主连接上流的结束与 `cancelStream` 竞争会产生孤立响应，使 FIFO 错位（重写方案 §5.4 第 42 条）。
+    /// 主连接上流的结束与 `cancelStream` 竞争会产生孤立响应，使 FIFO 错位。
     pub fn send(&self, request: Request) -> Transaction {
         let reply = if matches!(request.method, Method::Stream | Method::CancelStream) {
             Err(Error::InvalidArgument(format!(
@@ -227,7 +202,7 @@ impl Handle {
         } else {
             encode(&request).and_then(|frame| {
                 self.shared
-                    .write(&mut lock(&self.shared.writer), &request, &frame)
+                    .write(&lock(&self.shared.writer), &request, &frame)
             })
         };
         Transaction::new(reply, request)
@@ -240,12 +215,12 @@ impl Handle {
 
     /// `update`，`payload` 是补丁，对应 C++ 的 `Update`。
     pub fn update(&self, path: &str, payload: impl Into<Value>) -> Transaction {
-        self.send(with_payload(Method::Update, path, payload))
+        self.send(Request::with_payload(Method::Update, path, payload))
     }
 
     /// `create`，`payload` 是创建参数，对应 C++ 的 `Create`。
     pub fn create(&self, path: &str, payload: impl Into<Value>) -> Transaction {
-        self.send(with_payload(Method::Create, path, payload))
+        self.send(Request::with_payload(Method::Create, path, payload))
     }
 
     /// `delete`，对应 C++ 的 `Delete`。
@@ -255,7 +230,7 @@ impl Handle {
 
     /// `call`，`payload` 是命令或动作的参数，对应 C++ 的 `Call`。
     pub fn call(&self, path: &str, payload: impl Into<Value>) -> Transaction {
-        self.send(with_payload(Method::Call, path, payload))
+        self.send(Request::with_payload(Method::Call, path, payload))
     }
 
     /// 服务端地址。
@@ -264,7 +239,7 @@ impl Handle {
     }
 
     /// 至今经这条连接发出的 `create`、`update`、`delete`、`call` 数（含文件传输），供资源层判断缓存是否过期，取代
-    /// C++ 的 `SetNonIdempotentRequestHandler`（回调捕获裸指针、只有一个槽位，重写方案 §5.4 第 38 条）。
+    /// C++ 的 `SetNonIdempotentRequestHandler`（回调捕获裸指针、只有一个槽位）。
     ///
     /// 主连接的请求在写锁内计数：先读计数、再发出读请求，若读到的计数之后又有变更请求，下一次比较就会发现；
     /// 计数没变时，所有已计数的变更都排在这次读取之前，服务端按顺序执行。文件传输在另一条连接上，完成后才计数。
@@ -272,27 +247,10 @@ impl Handle {
         self.shared.writes.load(Ordering::Relaxed)
     }
 
-    /// 连接是否仍然可用；拆连接之后为 `false`，对应 C++ 的 `IsConnected`。
+    /// 连接是否仍然可用；拆连接之后为 `false`，对应 C++ 的 `IsConnected`。断开的原因由之后的任一请求、订阅或流
+    /// 以 `Disconnected` 给出（C++ 的 `SetDisconnectHandler`）。
     pub fn is_connected(&self) -> bool {
         self.shared.link.reason().is_none()
-    }
-
-    /// 设置断开回调，对应 C++ 的 `SetDisconnectHandler`（另给出原因）。连接丢失时在一个新线程上调用一次；`Client`
-    /// 的 Drop 不调用。已经断开（包括 `Client` 已 drop）时在当前线程上立即调用。再次设置替换尚未调用的回调。
-    pub fn on_disconnect(&self, callback: impl FnOnce(&DisconnectReason) + Send + 'static) {
-        let mut dispatch = lock(&self.shared.dispatch);
-        // 持锁取走旧回调再检查：拆连接先记下原因再取锁取回调，所以新旧回调合起来恰好调用一次。用户代码（回调与
-        // 被替换回调的 Drop）都在锁外执行。
-        let replaced = dispatch.on_disconnect.take();
-        if let Some(reason) = self.shared.link.reason() {
-            drop(dispatch);
-            drop(replaced);
-            callback(reason);
-        } else {
-            dispatch.on_disconnect = Some(Box::new(callback));
-            drop(dispatch);
-            drop(replaced);
-        }
     }
 }
 
@@ -303,12 +261,6 @@ impl fmt::Debug for Handle {
             .field("connected", &self.is_connected())
             .finish()
     }
-}
-
-pub(super) fn with_payload(method: Method, path: &str, payload: impl Into<Value>) -> Request {
-    let mut request = Request::new(method, path);
-    request.payload = payload.into();
-    request
 }
 
 /// 一个已写出的请求，等待它的应答，对应 C++ 的 `GoTransaction`。

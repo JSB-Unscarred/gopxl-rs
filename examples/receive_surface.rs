@@ -7,7 +7,6 @@ mod common;
 
 use common::NULL;
 use gopxl::gdp::{Body, Message, SurfaceAttrs};
-use gopxl::value::Value;
 
 fn main() -> common::Result {
     let system = common::connect()?;
@@ -18,22 +17,11 @@ fn main() -> common::Result {
         common::set_scan_mode(client, common::SCAN_MODE_SURFACE, "Surface")?;
     }
 
-    println!("Enabling intensity...");
-    let intensity = r#"{"parameters":{"scanModeSettings":{"intensityEnabled":true}}}"#;
-    client
-        .update(common::SCANNER_PATH, intensity.parse::<Value>()?)
-        .response()?;
+    common::enable_intensity(client)?;
 
     common::enable_gdp(client)?;
-    // `LMIFringeSnapshot` 引擎以传感器 ID 代替 `top`，共焦引擎带 `Layer0` 后缀。
-    let source = format!(
-        "scan:{}:{}:topUniformSurface",
-        common::ENGINE_ID,
-        common::SCANNER_ID
-    );
-    common::ensure_output(client, &source)?;
+    common::ensure_output(client, &common::scan_source("topUniformSurface"))?;
 
-    println!("Connecting to Gocator Protocol...");
     let mut gdp = common::connect_gdp(&system)?;
     common::start_if_ready(&system)?;
 

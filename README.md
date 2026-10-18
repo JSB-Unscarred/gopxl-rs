@@ -43,7 +43,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 ## 已实现的接口
 
 以官方 C++ SDK（8.5.62.52）的公共头文件为准；.NET 的同名接口归入同一行，行为差异写在说明列，.NET 独有的接口单独
-成行。各层实现时补充。
+成行。
 
 | SDK 接口 | Rust 接口 | 说明 |
 | --- | --- | --- |
@@ -58,36 +58,36 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoJson::Remove` | `Value::remove(&mut self, &str) -> Option<Value>` | 数组元素前移，不留 null |
 | `GoJson::Merge` | `Value::merge_patch(&mut self, &Value)` | RFC 7396 |
 | `GoJson::Contains`、`HasKey`、`Is*`、`Size`、`Empty`、`Begin`、`End`、`Find` | `pointer(..).is_some()`、`is_nil()`、`matches!`、`as_array()` / `as_map()` 的长度与迭代器 |  |
+| `GoJson(const GoJson&)`、`operator=`、`operator==`、`operator<<` | `Clone`、赋值 `Value::from(..)`、`PartialEq`、`Display` | 深拷贝；每个数只有一种表示，所以 `PartialEq` 直接 derive |
 | `GoJson::Add`、`Copy`、`Move`、`Patch`、`Flatten`、`Unflatten`、`GetHandle` | 不提供 | SDK 与示例都不调用；`Add`、`Copy`、`Move` 基于有损的 flatten，用 `set` / `remove` 组合即可；`GetHandle` 暴露 nlohmann 对象 |
-| `GoRequest::GoRequest(method, uri, content, args)` | `control::Request::new(Method, impl Into<String>) -> Request`，再设置 `payload`、`args` 字段 | `payload`、`args` 默认为 `{}`（线上 `0x80`）；路径原样发送 |
+| `GoRequest::GoRequest(method, uri, content, args)` | `control::Request::new(Method, impl Into<String>)`、`Request::with_payload(Method, impl Into<String>, impl Into<Value>) -> Request`，`args` 字段另行设置 | `payload`、`args` 默认为 `{}`（线上 `0x80`）；路径原样发送 |
 | `GoRequest::Method`、`Uri`、`Content`、`Arguments` | `Request` 的 `method`、`path`、`payload`、`args` 字段 |  |
-| `GoRequest::ToByteArray` | `Request::encode(&self, &mut Vec<u8>) -> Result<(), EncodeError>` | 写出含 carrier 头的整帧，与 C++ SDK 逐字节一致；长度超过 `u32::MAX` 时报错，不写出任何字节 |
-| `GoRequest::Id` | 不提供 | 只是本地计数，线上没有请求 id |
-| `GoRequestMethod::ToString` | `Method::as_str` | 另有 `ListSub`、`ClearSub`、`ListStream`；.NET 的全小写拼写（`unsub`、`cancelstream`）被服务端拒绝，这里用精确拼写 |
+| `GoRequest::ToByteArray` | `Request::encode(&self, &mut Vec<u8>) -> Result<(), EncodeError>` | 写出含 carrier 头的整帧，与 C++ SDK 逐字节一致（.NET 的 `ToMsgPack` 只给消息体）；长度超过 `u32::MAX` 时报错，不写出任何字节 |
+| `GoRequest::Id`（.NET 的 `RequestId`） | 不提供 | 只是本地计数，线上没有请求 id |
+| .NET 的 `IGoCtrlChannel` 及其三个委托、`GoRequest(string, string)`、`ToJsonArray`、`Dispose`、`GetHashCode` | 不提供 | 通道是内部实现（C++ 的在 `Internal/`）；方法名用 `Method` 枚举；线上只用 MessagePack；`Dispose` 即 drop；`System` 不做 map 键 |
+| `GoRequestMethod::ToString` | `Method::as_str` | 另有 `ListSub`、`ClearSub`、`ListStream`；.NET 的全小写拼写（`MsgPackMethod`：`unsub`、`cancelstream`）被服务端拒绝，这里用精确拼写 |
 | `GoResponse::Type`、`GoResponseType::FromString`；`GoCtrlChannelV1` 的读帧 | `control::Inbound::decode(Bytes) -> Result<Inbound, InboundError>` | 未知 `type` 为 `Inbound::Other`（C++ 当作响应）；服务端从不产生的帧报错（C++ 丢弃后 FIFO 错位） |
 | `GoResponse::Status`、`Path`、`Payload`（`GoRequestResponse`） | `control::Response` 的 `status`、`path`、`payload` 字段 | 缺少 `status` 是坏帧（C++ 当作成功）；`path` 缺失为空串，`payload` 缺失为 `Nil` |
-| `GoNotificationResponse::NotificationType`；`GoNotificationType::FromString` | `control::Notification` 的 `event` 字段（`EventType`） | 未知字符串为 `EventType::Other`（C++ 当作 `Updated`） |
+| `GoNotificationResponse::NotificationType`；`GoNotificationType::FromString` | `control::Notification` 的 `event` 字段（`EventType`） | 未知字符串为 `EventType::Other`（C++ 当作 `Updated`，.NET 抛异常） |
 | `GoStreamResponse::StreamIdentifier`、`StreamStatus` | `control::StreamMessage` 的 `stream_id`、`state`（`StreamState`）字段 |  |
 | `GoResponse::Raw` | 不提供 | 类型化的字段已包含全部内容 |
 | `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
-| `GoRestClient` 的事务队列（读线程按发送顺序完成 `GoTransaction`） | `control::ControlCore`：`register(&Request) -> ReplyRx`、`on_inbound(Inbound) -> Result<Option<Notification>, DisconnectReason>`、`fail_all(&Arc<DisconnectReason>)` | 纯状态机，不做 I/O，连接层在锁外解码后交给它；写出前登记；超时的请求留下墓碑吸收迟到的响应；响应带 `path` 且队首不是 `create` 时按段比较，不一致时报错，由连接层拆连接（C++ 错位后继续）；挂起队列为空时的响应丢弃（同 C++） |
-| `GoRestClient::Connect` | `control::Client::connect(SocketAddr) -> Result<Client>` | 超时 1 s；设置 `TCP_NODELAY`、keepalive（空闲 30 s 后每 10 s 探测）与 10 s 写超时；端口 0 报 `InvalidArgument`（C++ 直接交给 socket） |
+| `GoRestClient::Connect` | `control::Client::connect(SocketAddr) -> Result<Client>` | 超时 1 s（.NET 为 1000 s）；设置 `TCP_NODELAY`、keepalive（空闲 30 s 后每 10 s 探测）与 10 s 写超时；端口 0 报 `InvalidArgument`（C++ 直接交给 socket） |
 | `GoRestClient::Disconnect` | `drop(client)` | 挂起的请求以 `Disconnected(Closed)` 失败；只 shutdown、不 join 读线程，从不阻塞（C++ 先 join 后 shutdown，可能挂住） |
 | `GoRestClient::IsConnected` | `control::Handle::is_connected() -> bool` | 拆连接后为 `false`（C++ 连接丢失后仍为真）；`Client` 经 `Deref` 调用 `Handle` 的方法，`Client::handle()` 取得可移到别的线程的句柄 |
 | `GoRestClient::Read`、`Update`、`Create`、`Delete`、`Call` | `Handle::read(&str)`、`update(&str, impl Into<Value>)`、`create(&str, impl Into<Value>)`、`delete(&str)`、`call(&str, impl Into<Value>)`，均返回 `Transaction` | 第二个参数即 C++ 的 `content`（线上的 `payload`）；`args` 经 `Handle::send` 设置；在写锁内先登记再写出（C++ 先入队后发送，发送失败留下孤儿事务）；写出失败或超时即拆连接 |
 | — | `Handle::send(Request) -> Transaction` | 任意方法与 `args`，`listSub`、`clearSub`、`listStream` 也经它发送（两个 SDK 都没有）；`stream`、`cancelStream` 报 `InvalidArgument`，流见 `open_stream` |
 | `GoTransaction::GetResponse`、`CheckResponse` | `Transaction::timeout(Duration) -> Transaction`、`response() -> Result<Response>` | 默认 3 s，从 `response()` 开始计；`status` 不是 OK 时为 `Error::Request`；超时为 `Error::Timeout`，槽位成为墓碑，连接照常可用；丢弃 `Transaction` 即 fire-and-forget |
 | `GoTransaction::GetRequest`、`GetResponseFuture` | 不提供 | 请求在调用方手里；方法与路径出现在错误里 |
-| `GoRestClient::Sub`、`UnSub`、`SetSubHandler` | `Handle::subscribe(&str) -> Result<Subscription>`；`Subscription::recv_timeout(Duration) -> Result<Option<Notice>>`、`iter()`；drop 即退订 | 拉取式：每个订阅一个队列（1024 条，满了丢最老的并产出 `Notice::Lagged`，读线程从不阻塞）；只收到服务端按该表达式会投递的通知（C++ 的全局处理器收到全部通知）；同一表达式的订阅共享服务端订阅，最后一个 drop 时写出 `unSub`，不等应答；`sub` 失败或超时时退回租约（超时后才执行的 `sub` 由随后的 `unSub` 撤销） |
-| `GoRestClient::AddNotificationListener`、`RemoveNotificationListener`、`ClearAllListeners` | `Handle::add_listener(&str, impl FnMut(Notice)) -> Result<Listener>`；drop `Listener` | 每个监听器一个线程，按到达顺序回调（C++ 每条通知起一个线程、乱序；回调在锁内执行，重入即死锁）；`sub` 失败时不留下监听器；移除时丢弃未处理的通知 |
-| `GoRestClient::ReplaceListenerCallback` | 不提供 | drop 旧的 `Listener` 再 `add_listener` |
+| `GoRestClient::Sub`、`UnSub`、`SetSubHandler` | `Handle::subscribe(&str) -> Result<Subscription>`；`Subscription::recv_timeout(Duration) -> Result<Option<Notice>>`；drop 即退订 | 拉取式：每个订阅一个队列（1024 条，满了丢最老的并产出 `Notice::Lagged`，读线程从不阻塞）；只收到服务端按该表达式会投递的通知（C++ 的全局处理器收到全部通知）；同一表达式的订阅共享服务端订阅，最后一个 drop 时写出 `unSub`，不等应答；`sub` 失败或超时时同样注销（超时后才执行的 `sub` 由随后的 `unSub` 撤销） |
+| `GoRestClient::AddNotificationListener`、`RemoveNotificationListener`、`ReplaceListenerCallback`、`ClearAllListeners` | 不提供 | 回调式订阅即在自己的线程里对 `Subscription` 循环 `recv_timeout`，drop 即移除（C++ 每条通知起一个线程、乱序；回调在锁内执行，重入即死锁） |
 | `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Handle::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(Duration) -> Result<Option<StreamMessage>>`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
-| `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | `Handle::on_disconnect(impl FnOnce(&DisconnectReason))` | 连接丢失时在一个新线程上调用一次并给出原因，回调里可以发请求、重连；`Client` 的 drop 不触发；已断开时立即调用；只在真正拆连接时触发（C++ 一个坏消息就触发） |
+| `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | 不提供 | 拆连接后 `is_connected` 为假，之后每个请求、订阅与流都返回 `Disconnected(原因)`；只在真正拆连接时（C++ 不给原因，一个坏消息就触发） |
 | — | `Handle::transfer(Request, Duration) -> Result<Response>` | 文件传输（归档、恢复、升级、作业与回放数据）用的临时连接，不阻塞主连接；超时是连续没有收到字节的时长；下载的 `Bin` 引用响应帧 |
 | `GoSystem::GoSystem(address, port)`、`SetAddress`、`SetControlPort`、`Connect` | `System::connect(SocketAddr) -> Result<System>` | 存在即已连接，没有“未连接”的状态；端口 0 报 `InvalidArgument` |
-| `GoSystem::Disconnect`、`~GoSystem` | `drop(system)` | 同 `GoRestClient::Disconnect` |
-| `GoSystem::Client` | `System::client() -> &Client` | `IsConnected`、`SetDisconnectHandler` 经它调用 `is_connected`、`on_disconnect` |
+| `GoSystem::Disconnect`、`~GoSystem`（.NET 的 `Dispose`） | `drop(system)` | 同 `GoRestClient::Disconnect` |
+| `GoSystem::Client` | `System::client() -> &Client` | `IsConnected` 经它调用 `is_connected` |
 | `GoSystem::Address`、`ControlPort` | `Handle::addr() -> SocketAddr` |  |
 | `GoSystem::Start`、`Stop` | `System::start()`、`stop() -> Result<()>` | `call /system/commands/start` / `stop`，超时 15 s |
 | `GoSystem::RunningState` | `System::running_state() -> Result<RunState>` | 读 `/system` 的 `runState`，超时 15 s；表外的值为 `RunState::Other`（C++ 直接强制转换） |
@@ -95,16 +95,17 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoSystem::GdpPort` | `System::gdp_port() -> Result<u16>` | 读 `/controls/gocator` 的 `serverPort`，超时 15 s；不在 `u16` 内时报 `Error::Payload`（C++ 截断） |
 | `GoSystem::SensorPath` | `System::sensor_path(&str) -> Result<Option<String>>` | 与 C++ 一样逐层读取引擎、扫描器、传感器并比较字符串 `serialNumber`；找不到时为 `None`（C++ 返回 `""`） |
 | `ApiVersion`、`ReleaseVersion` | `API_VERSION`（`"9.0.0"`）、`RELEASE_VERSION`（`"1.5"`） |  |
-| `BuildVersion`、`BuildVersionNumber` | 不提供 | crate 版本由 Cargo 给出 |
-| `GoGdpClient::Connect`、`Close` | `gdp::GdpClient::connect(SocketAddr) -> Result<GdpClient>`；drop | 超时 5 s；读线程逐条解码；从不写 socket |
+| `BuildVersion`、`BuildVersionNumber`、`GO_PXL_SDK_*` 版本数字常量（.NET 的 `Sdk*Constants`） | 不提供 | crate 版本由 Cargo 给出 |
+| `GoGdpClient::Connect`、`Close`（.NET 的 `Dispose`） | `gdp::GdpClient::connect(SocketAddr) -> Result<GdpClient>`；drop | 超时 5 s；读线程逐条解码；从不写 socket |
 | `GoGdpClient::ReceiveDataSync`、`DataSet`、`ReceiveDataAsync` | `GdpClient::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | 按 `cas.is_last_msg` 组集；单一截止时间（C++ 读到一半时不限时）；区分 `Timeout` 与 `Incomplete`，已收到的消息保留到下一次；异步接收即在自己的线程里循环；本地只缓冲 4 条，不读时背压到服务端（C++ 的异步队列无界）；信封或 CAS 坏掉的消息丢弃 |
 | `GoGdpClient::ClearData` | `GdpClient::clear_data(&mut self) -> Result<()>` | 重连，丢弃积压的数据与未完成的数据集 |
-| `GoGdpClient::IsConnected`、`IpAddress`、`Port` | 不提供 | 断开后 `receive` 返回 `RecvError::Disconnected`；地址由调用方给出 |
+| `GoGdpClient::IsConnected`、`IpAddress`、`Port`；`GoDataSet::Sender`、`SetSender` | 不提供 | 断开后 `receive` 返回 `RecvError::Disconnected`；地址由调用方给出；数据集由调用 `receive` 的 `GdpClient` 返回，来源已知 |
+| `GoDataSet::GdpMsgAt`、`Count`、`Clear`、`Add` | `Vec<gdp::Message>` 的下标、长度与方法 |  |
 | `GoDiscoveryClient::BlockingDiscover`、`InstanceList` | `discovery::discover(Duration, bool) -> io::Result<Vec<Instance>>` | 每个启用的 IPv4 网卡（含 169.254.x.x）各发一次，单个网卡失败不影响其他网卡；0、300、1000 ms 重发（C++ 只发一次）；按（地址，Web 端口）去重；GoPxL 实例在前；每次调用都是全新的状态（C++ 的经典列表从不清空） |
 | `GoDiscoveryClient::GoPxLInstanceList`、`ClassicInstanceList`、`Instance`、`GoPxLInstance`、`ClassicInstance` | 按 `Instance::classic`、`address`、`web_port`、`serial_number` 筛选 `discover` 的结果 |  |
-| `GoRestClient::AddNotificationListener` 的路径匹配 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \` 与 NUL（服务端在 NUL 处截断表达式），生成的正则无法编译时同样报错 |
+| `GoRestClient::Sub` 表达式的匹配规则 | `control::SubscriptionExpr::new(&str) -> Result<SubscriptionExpr, SubExprError>`、`delivers(&EventType, &str) -> bool`、`text()` | 按服务端的规则：`*` 跨越 `/`，`/a/*` 也匹配 `/a`，`embeddedUpdated` 匹配祖先（C++ 按前缀与祖先回溯，与服务端不一致）；与服务端一样按字节匹配，`.` 不匹配 `\r`、`\n`；拒绝正则元字符 `\| ( ) [ ] { } ^ \` 与 NUL（服务端在 NUL 处截断表达式），生成的正则无法编译时同样报错 |
 | `GoSchemaValidator::SchemaForPath` | `schema::schema_for_path(&Value, &str) -> Option<&Value>` | 路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`）；路径与 `Value::pointer` 同一语法（`/` 是键 `""`，C++ 把它当作根）；`type` 为可空数组时同样导航 |
-| `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<Issue>` | 空表即通过；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计；`type: "null"` 只接受 `Nil`（C++ 不认识它，一律通过） |
+| `GoSchemaValidator::Validate` | `schema::validate(&Value, &Value) -> Vec<String>` | 每条是被违反的关键字与界限（`maximum 10`），空表即通过，同 C++ 的 `vector<string>`；`binary` 要求 `Bin`，支持可空类型数组，`multipleOf` 对负数不误报，`enum` 的整数精确比较，空 `enum` 不约束，长度按字符计；`type: "null"` 只接受 `Nil`（C++ 不认识它，一律通过） |
 | `GoSystem::Resource` | `System::resource(impl Into<String>) -> resource::Resource` | 开启写入前的校验（与 `GoSystem` 的资源管理器相同）；每次调用得到一个独立的 `Resource`，各有各的缓存 |
 | `GoResource::GoResource(client, uri)` | `Resource::new(Handle, impl Into<String>) -> Resource` | 不发请求；超时 5 s、展开层级 0、不校验 |
 | `GoResource` 的拷贝构造与赋值 | 不提供 | 缓存与订阅只有一个 owner；需要第二个时 `Resource::new(r.handle().clone(), r.path())` |
@@ -120,7 +121,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResource::CancelUpdate`、`IsUpdateCancelled`、`IsUpdateDeferred`、`DiscardPending`；`GoUpdateScope::Cancel` | 不提供 | 补丁在调用方手里，不发送即取消；没有共享的待发补丁（C++ 的 `Flush` 失败时丢失补丁，作用域的异常路径清掉外层作用域的改动） |
 | `GoResource::Schema` | `Resource::schema() -> Result<&Value>` | 读参数 `{includeSchema: true}`，只更新 schema 缓存（C++ 用不展开的数据覆盖已展开的数据缓存）；没有 `_schema` 时为 `Nil` |
 | `GoResource::SchemaFor` | `schema::schema_for_path(resource.schema()?, &str)` | 不在 schema 中时为 `None`（C++ 抛 `GoResourceError`） |
-| `GoResource::Validate` | `Resource::validate(&str, &Value) -> Result<Vec<Issue>>` | 空表即通过；不在 schema 中的位置不约束 |
+| `GoResource::Validate` | `Resource::validate(&str, &Value) -> Result<Vec<String>>` | 空表即通过；不在 schema 中的位置不约束 |
 | `GoResource::EnableValidation`、`IsValidationEnabled` | `Resource::set_validation(bool)`、`validation_enabled()` | `System::resource` 得到的资源默认开启 |
 | `GoResource::Subscribe`、`Unsubscribe`、`IsSubscribed` | `Resource::subscribe() -> Result<()>`、`unsubscribe()`、`is_subscribed()` | 订阅 `<路径>/*`，收得到子项的 `created` / `deleted`（C++ 订阅精确路径）；订阅时数据缓存失效；`extId=` 路径与不规范的路径（不以 `/` 开头、有空段）收不到通知（通知带规范路径）；取消订阅时先取空队列；取消订阅与 Drop 不等 `unSub` 的应答（C++ 的析构最多阻塞 5 s） |
 | `GoResource::Links`、`Embedded`、`CallArguments` | `data()?["_links"]`、`data()?["_embedded"]`、`data()?.pointer("/parameters")` |  |
@@ -139,7 +140,8 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResourceManager::ResetConnectionState` | 不提供 | 连接断开后缓存自动过期；不重连，重建 `System` 与资源 |
 | `GoResourceManager::SetSubscriptionOptimizedInvalidation`、`SubscriptionOptimizedInvalidation` | 不提供 | 已订阅的资源同样按写计数过期（相当于 C++ 关闭这个优化），订阅只用于发现其他客户端与设备自身的修改，写入之后不会读到通知到达之前的旧数据 |
 | `GoResourceManager::Client` | `Resource::handle() -> &Handle` |  |
-| `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT` | 3600、3601 |
+| `GO_PXL_SDK_DEFAULT_CONTROL_PORT`、`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT`、`GO_PXL_SDK_DEFAULT_TCP_TIMEOUT_MILLISECONDS` | `control::DEFAULT_PORT`、`gdp::DEFAULT_PORT`；建立 TCP 连接的 1 s 超时（`Client::connect`、开流与文件传输） | 3600、3601、1000 ms |
+| `GO_PXL_SDK_DEFAULT_WEB_PORT`、`GO_PXL_SDK_MILLISECONDS_TO_MICROSECONDS_CONVERSION`、发现的 `MAX_MESSAGE_SIZE` 等常量；`GoNotificationType::ToString`、`GoResponseType::ToString`；`Byte`、`ByteArray`、`SerialNum`、`ResourcePath` 别名 | 不提供 | 协议不用 web 端口（实例的见 `Instance::web_port`）；超时用 `Duration`；枚举有 `Debug`；别名即 `u8`、`Vec<u8>`、`String` |
 | `GoGdpMsg::Deserialize`；`GoGdpClient` 的消息分派 | `gdp::decode_message(Bytes) -> Result<Message, GdpError>` | 每条消息都解析 CAS（C++ 跳过未知类型，丢掉 isLastMsg）；CAS 之后坏掉时为 `Body::Invalid` |
 | — | `gdp::decode_all(Bytes) -> Result<Vec<Message>, GdpError>` | 控制通道 `/dataSources` 流的 bin |
 | `GoGdpMsg::Type` | `gdp::Message` 的 `ty`、`body`（`Body`）字段 |  |
@@ -156,15 +158,14 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoGdpFeaturePoint`、`GoGdpFeatureLine`、`GoGdpFeaturePlane`、`GoGdpFeatureCircle` 的 getter | `gdp::PointFeature`、`LineFeature`、`PlaneFeature`、`CircleFeature` 的字段 |  |
 | `GoGdpPixelFormat::PixelBits`、`IsNative`、`ToString` | `gdp::PixelFormat::bits`、`is_legacy`、`name` | `PixelBytes` 不提供（即 `bits() / 8`） |
 | `GoPxLDiscoveryProto::Broadcast` 发出的报文 | `discovery::encode_discover() -> [u8; 24]` |  |
-| `GoPxLDiscoveryProto::ParseReply`、`GoDiscoveryClient::ParseReply` | `discovery::parse_announce(&[u8]) -> Result<Instance, DiscoveryError>` | 只解析收到的字节；字段缺失或类型不对时取默认值（C++ 丢弃整条 Announce） |
+| `GoPxLDiscoveryProto::ParseReply`、`GoDiscoveryClient::ParseReply` | `discovery::parse_announce(&[u8]) -> Result<Instance, DiscoveryError>` | 只解析收到的字节；类型不对或无法解析时取默认值（C++ 丢弃整条 Announce），缺失时与 C++ 一样取默认值 |
 | `ClassicDiscoveryProto::BroadcastGetIP`、`SendGetInfo` 发出的报文 | `discovery::classic::encode_get_ip() -> [u8; 32]`、`encode_get_info(u32) -> [u8; 32]` |  |
 | `ClassicDiscoveryProto::ParseClassicGetIPReply`、`ParseClassicGetInfoReply` | `discovery::classic::handle_reply(&[u8], &mut Vec<Instance>) -> Result<Option<u32>, DiscoveryError>` | 返回需要发 `GetInfo` 的新序列号；按 `MsgId` 分派（C++ 按长度分派，丢掉 99 字节的 `GetInfo` 回复） |
-| `GoInstance::Get*`、`Set*` | `discovery::Instance` 的字段 | 地址是 `Option<Ipv4Addr>`；另有 `classic`、`truncated` |
-| — | `Instance::is_connectable`、`control_addr`、`gdp_addr` | SDK 示例 `Discover.cpp` 的连接判断 |
+| `GoPxLDiscoveryProto` / `ClassicDiscoveryProto` 的 `ConstructReceiver`、`ConstructSender`、`Instance`、`GoPxlInstances` / `ClassicInstances` | 不提供 | `discover` 内部的 socket 与结果列表 |
+| `GoInstance::Get*`、`Set*` | `discovery::Instance` 的字段 | 地址是 `Option<Ipv4Addr>`；`serial_number`、`hmi_status` 是 `Option`（C++ 默认 0 / 1）；另有 `classic`、`truncated` |
+| — | `Instance::control_addr` | SDK 示例 `Discover.cpp` 的连接判断 |
 
 ## 数据类型与协议
-
-各层实现时补充。
 
 | SDK 定义或协议 | Rust 定义 | 说明 |
 | --- | --- | --- |
@@ -181,34 +182,34 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResponseType` | `control::Inbound`：`Response`、`Notification`、`Stream`、`Other` |  |
 | `GoNotificationType` | `control::EventType` | 含 `Other(String)` |
 | 流状态字符串（`streaming` / `complete` / `abort`） | `control::StreamState` | 含 `Other(String)` |
-| `kStatus` | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留 |
+| `kStatus`（.NET 的 `GoStatus`） | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留；.NET 的枚举没有 −975 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
-| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode`、`Desync` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
+| `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
 | `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`Validation`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System`、`Resource::get` 或 `create_child` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）；`Validation` 见 `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`：`Ready`、`Running`、`Conflict`、`Other(i64)` | 0、1、2 与表外的值 |
 | `GoTransaction` | `control::Transaction` |  |
-| 应答通道（C++ 的 `GoTransaction` 内部状态） | `control::ReplyRx` = `Receiver<Result<Response, Arc<DisconnectReason>>>` | 由 `register` 建立的 `sync_channel(1)`，读线程持锁发送时从不阻塞；丢弃即墓碑 |
 | `GoNotificationHandler`、`NotificationCallback` 收到的通知 | `control::Notice`：`Event(Arc<Notification>)`、`Lagged(u64)` | 一条通知投递给多个订阅时共享；`Lagged` 是在此之前丢掉的条数 |
-| `NotificationListenerId` | `control::Listener` | drop 即移除 |
 | `GoStreamHandler` 收到的 `GoStreamResponse` | `control::StreamMessage`（`StreamHandle::recv_timeout` 取出） | 结束消息照常取出：`state` 为 `Complete` / `Abort`，`status` 为结束原因；`/dataSources` 的数据可能紧跟在结束消息之后（服务端每轮先写响应队列、再写流队列） |
 | `GoDataSet` | `Vec<gdp::Message>` | 以 `is_last_msg` 的消息结束 |
 | `ReceiveDataSync` 的超时与不完整 | `gdp::RecvError`：`Timeout`、`Incomplete { messages }`、`Disconnected` |  |
 | 服务端的 `SubscriptionExpression` | `control::SubscriptionExpr`、`control::SubExprError` | 两个正则（R、E）逐字移植后由 regex-lite 编译 |
 | `_schema`（基于 JSON Schema Draft 2019-09 的方言） | `Value` | 注解（`unit`、`visibility`、`extendedType` …）直接读取 |
-| `GoResourceValidationError::Errors()` | `schema::Issue` | 每个关键字一个变体 |
+| `GoResourceValidationError::Errors()` | `Vec<String>` | 每个关键字一条（`maximum 10`），同 C++ 的 `vector<string>` |
 | `GoRelationType` | `resource::rel`：`ITEM`、`SCANNER`、`SUB_TASK`、`CONTENT`、`COMMAND`、`ACTION` | `GoResource::DEFAULT_RELATION_TYPE` 即 `ITEM`；Rust 的方法显式传入 rel |
 | `GoResource::DEFAULT_TIMEOUT_MS`、`DEFAULT_EXPAND_LEVEL` | `Resource::new` 的默认值：5 s、0 |  |
 | `GoResourceError` | `Error::Payload`（`get` 的字段缺失或类型不对，`create_child` 的响应中找不到新路径） | C++ 的其余抛出点（资源已删除、缺少管理器、`EndUpdate` 不配对）在 Rust 中不存在 |
 | `GoResourceValidationError` | `Error::Validation { path, pointer, issues }` | `Errors()` 即 `issues`，`pointer` 是补丁中不合格的值的位置 |
 | HAL 的 rel（数组、单个对象、`[]`、nil 或缺失） | `Resource::child_paths`、`children`、`command_names`、`action_names` 按条目列表读取 | 服务端只有一个引用时写出单个对象 |
-| `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)` |
+| `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)`；`GoGdpSignal` 没有字段，即 `Body::Signal` |
 | `CommonAttributes` | `gdp::Cas` |  |
 | `GoGdpTransform`、`GoGdpBoundingBox` | `Option<[f32; 12]>`、`Option<[f32; 6]>` | 线上顺序，保留 `f32` |
-| `kArray1<k16s>`、`kArray2<k16s>`、`kPoint16s`、`kPoint3d16s` 的数组 | `Vec<i16>`、`Vec<[i16; 2]>`、`Vec<[i16; 3]>` | 行主序；`k16S_NULL` 即 `i16::MIN` |
+| `kArray1<k16s>`、`kArray2<k16s>`、`kPoint16s`、`kPoint3d16s`（.NET 的 `GoPoint16s`、`GoPoint3d16s`）的数组 | `Vec<i16>`、`Vec<[i16; 2]>`、`Vec<[i16; 3]>` | 行主序；`k16S_NULL` 即 `i16::MIN` |
+| `kPoint3d32f`、`kPoint3d64f`、`kPoint64f`（.NET 的 `GoPoint3d32f`、`GoPoint3d64f`、`GoPoint64f`） | `[f32; 3]`、`[f64; 3]`、`[f64; 2]` | 图形、特征、网格与图像的坐标；轮廓与表面的分辨率、偏移拆成 `x_scale`、`z_offset` 等字段 |
 | `kArray1<k8u>`、`kArray2<k8u>`（强度、图像像素） | `Bytes` | 帧的零拷贝切片 |
-| `GoGdpPixelFormat::FormatType` | `gdp::PixelFormat(i32)` 与全部常量 | BayerXX16 用 PFNC 值 0x0110002E 起（.NET 的值错误） |
+| `GoGdpPixelFormat::FormatType` | `gdp::PixelFormat(i32)` 与全部常量 | BayerXX16 用 PFNC 值 0x0110002E 起（.NET 的值错误）；`ColorType`、`PixelSize` 只是值的组成位，不单独提供，位数由 `bits()` 读出 |
+| `kCfa`（.NET 的 `GoCfa`） | `Image::color_filter: i32` | 0 无、1–4 拜耳 |
 | `GdpSpot` | `gdp::Spot` |  |
-| `MeshMsgChannel`、`Channel_ID` | `gdp::MeshChannel`、`gdp::MeshData` |  |
+| `MeshMsgChannel`、`Channel_ID`、`Channel_Type`、`Channel_State`、`GoFacet32u` | `gdp::MeshChannel`（`id`、`ty`、`state` 原样保留为整数）、`gdp::MeshData`（面为 `[u32; 3]`） |  |
 | `GoGraphics` 的 `GoPointSet`、`GoLineSet`、`GoRegion`、`GoPlane`、`GoRay`、`GoLabel`、`GoPosition` | `gdp::PointSet`、`LineSet`、`Region`、`Plane`、`Ray`、`Label`、`Position` |  |
 | 以 `k64F_NULL` 表示的缺失字段 | `Option` |  |
 | `GoInstance` | `discovery::Instance` |  |

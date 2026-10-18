@@ -8,7 +8,7 @@
 
 mod common;
 
-use gopxl::value::Value;
+use gopxl::Value;
 
 fn main() -> common::Result {
     let system = common::connect()?;

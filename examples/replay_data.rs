@@ -11,10 +11,7 @@ mod common;
 use std::time::Duration;
 
 use gopxl::Value;
-use gopxl::control::{Method, Request};
 
-const BACKUP_PATH: &str = "/system/commands/archive";
-const RESTORE_PATH: &str = "/system/commands/restore";
 const REPLAY_PATH: &str = "/replay/playback";
 const REPLAY_SEEK_PATH: &str = "/replay/commands/seek";
 const RECORDING_PATH: &str = "/replay/recording";
@@ -49,31 +46,10 @@ fn main() -> common::Result {
     std::thread::sleep(Duration::from_millis(500));
     system.stop()?;
 
+    // 只含当前作业与回放数据的归档就是录制文件。
     let contents = r#"{"contents":["liveJob","replay"]}"#.parse::<Value>()?;
-    let archive = Request {
-        payload: contents.clone(),
-        ..Request::new(Method::Call, BACKUP_PATH)
-    };
-    let response = client.transfer(archive, common::RECEIVE_TIMEOUT)?;
-    let data = response.payload["data"]
-        .as_bytes()
-        .ok_or("archive response has no binary \"data\"")?;
-
-    println!("Downloading .gprec file...");
-    let recording_file = std::path::absolute(RECORDING_FILE)?;
-    std::fs::write(&recording_file, data)?;
-    println!("Recording file location: {}", recording_file.display());
-    drop(response);
-
-    let mut restore = Request {
-        payload: contents,
-        ..Request::new(Method::Call, RESTORE_PATH)
-    };
-    restore
-        .payload
-        .set("data", std::fs::read(&recording_file)?)?;
-    println!("Uploading .gprec file...");
-    client.transfer(restore, common::EXTENDED_TIMEOUT)?;
+    let recording_file = common::download_archive(client, &contents, RECORDING_FILE)?;
+    common::restore_archive(client, contents, &recording_file)?;
 
     println!("Enabling replay...");
     client
@@ -83,19 +59,14 @@ fn main() -> common::Result {
         )
         .response()?;
 
-    let replay = client.read("/replay").response()?.payload;
-    let frame_count = replay["frameCount"]
+    let frame_count = common::read_at(client, "/replay", "/frameCount")?
         .as_i64()
-        .ok_or("/replay has no \"frameCount\"")?;
+        .ok_or("/replay frameCount is not an integer")?;
     println!("Number of frames in recording: {frame_count}");
 
-    // 开始并立即停止回放；与 C++ 相同直接发命令，用默认的 3 s 超时。
-    client
-        .call("/system/commands/start", Value::object())
-        .response()?;
-    client
-        .call("/system/commands/stop", Value::object())
-        .response()?;
+    // 开始并立即停止回放。
+    system.start()?;
+    system.stop()?;
 
     if frame_count <= 0 {
         println!("Number of frames is zero - Cannot jump to specific frame");

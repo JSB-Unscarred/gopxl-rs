@@ -9,7 +9,7 @@
 
 mod common;
 
-use gopxl::gdp::{Body, Cas, Image, PixelFormat};
+use gopxl::gdp::{Body, Cas, Image};
 
 fn main() -> common::Result {
     let system = common::connect()?;
@@ -23,15 +23,9 @@ fn main() -> common::Result {
 
     common::enable_gdp(client)?;
     // 传感器的图像数据源：传感器 ID 加数据源键（`LMILaserLineProfiler` 为 `Image`）与序号 0。
-    let source = format!(
-        "scan:{}:{}:{}Image0",
-        common::ENGINE_ID,
-        common::SCANNER_ID,
-        common::SENSOR_ID
-    );
+    let source = common::scan_source(&format!("{}Image0", common::SENSOR_ID));
     common::ensure_output(client, &source)?;
 
-    println!("Connecting to Gocator Protocol...");
     let mut gdp = common::connect_gdp(&system)?;
 
     let data_set = gdp.receive(common::RECEIVE_TIMEOUT)?;
@@ -42,7 +36,7 @@ fn main() -> common::Result {
     for (i, message) in data_set.iter().enumerate() {
         println!("{} GDP Output Source {}", "-".repeat(64), i + 1);
         if let Body::Image(image) = &message.body {
-            save_image(&message.cas, image)?;
+            save_image(&message.cas, image);
         } else {
             println!(
                 "No image found in the message. \
@@ -56,8 +50,8 @@ fn main() -> common::Result {
     Ok(())
 }
 
-/// 打印图像的属性；像素格式是 C++ 示例支持的几种之一时写成 BMP。
-fn save_image(cas: &Cas, image: &Image) -> common::Result {
+/// 打印图像的属性并写成 BMP；`write_bmp` 不支持的像素格式只打印原因。
+fn save_image(cas: &Cas, image: &Image) {
     common::print_cas("Image", cas);
     println!("FlippedX: {}", image.flipped_x);
     println!("FlippedY: {}", image.flipped_y);
@@ -67,17 +61,8 @@ fn save_image(cas: &Cas, image: &Image) -> common::Result {
     println!("PixelFormat: {:?}", image.pixel_format);
     println!("ColorFilter: {}", image.color_filter);
 
-    if matches!(
-        image.pixel_format,
-        PixelFormat::GREYSCALE_8BPP
-            | PixelFormat::MONO8
-            | PixelFormat::BGR8
-            | PixelFormat::MONO12
-            | PixelFormat::MONO12P
-            | PixelFormat::MONO16
-    ) {
-        common::write_bmp(common::IMAGE_FILE, image)?;
-        println!("Image saved as '{}'", common::IMAGE_FILE);
+    match common::write_bmp(common::IMAGE_FILE, image) {
+        Ok(()) => println!("Image saved as '{}'", common::IMAGE_FILE),
+        Err(e) => println!("{e}"),
     }
-    Ok(())
 }

@@ -12,7 +12,7 @@
 //!
 //! [`handle_reply`] 修掉 C++ 的两个问题：按 `MsgId` 而不是数据报长度分派（C++ 要求 `GetInfo` 回复至少 112 字节，
 //! 丢掉只含 99 字节已知字段的回复）；`app_id` 与 `serial_number` 都用截断后的 `u32` 序列号。读取方式与
-//! 父模块相同，坏报文只得到 `Err`。
+//! 父模块相同：Length 字段不校验，字段不全的坏报文只得到 `Err`。
 
 use std::net::Ipv4Addr;
 
@@ -30,10 +30,6 @@ const GET_INFO: u64 = 0x0005;
 const GET_IP_REPLY: u64 = 0x1001;
 const GET_INFO_REPLY: u64 = 0x1005;
 const OK: u64 = 1;
-/// `GetIP` 回复的固定长度（`ClassicDiscoveryGetIPReply`）。
-const GET_IP_REPLY_LEN: usize = 80;
-/// `GetInfo` 回复中已知字段的总长度，之后可能跟着可变的尾部。
-const GET_INFO_REPLY_LEN: usize = 99;
 
 /// `GetIP` 命令，对应 `ClassicDiscoveryProto::BroadcastGetIP`。
 pub fn encode_get_ip() -> [u8; 32] {
@@ -54,30 +50,25 @@ fn command(msg_id: u64, serial: u32) -> [u8; 32] {
 /// 处理经典 socket 上的一个数据报；`instances` 是本次发现的结果，只查找、修改其中的经典实例（两种协议之间不去重，
 /// 与 C++ 相同）。
 ///
-/// - `GetIP` 回复（80 字节）且序列号是新的：追加经典实例（`app_id` 为 `"classic-<序列号>"`、`app_name` 为
+/// - `GetIP` 回复且序列号是新的：追加经典实例（`app_id` 为 `"classic-<序列号>"`、`app_name` 为
 ///   `"Gocator Classic"`），返回 `Some(序列号)`，调用方随后广播 [`encode_get_info`]；序列号已存在时返回 `None`；
-/// - `GetInfo` 回复（Length ≥ 99 且不超过数据报）：按序列号就地更新 `app_version`、`control_port`、
-///   `gdp_port`（`DataPort`）、`web_port`，返回 `None`；未知序列号忽略；
+/// - `GetInfo` 回复：按序列号就地更新 `app_version`、`control_port`、`gdp_port`（`DataPort`）、`web_port`，
+///   返回 `None`；未知序列号忽略；
 /// - 偏移 16 是签名的 `GetIP` / `GetInfo` 命令（包括自己广播的）返回 [`DiscoveryError::Command`]。
 pub fn handle_reply(
     datagram: &[u8],
     instances: &mut Vec<Instance>,
 ) -> Result<Option<u32>, DiscoveryError> {
     let mut buf = datagram;
-    let length = usize::try_from(buf.try_get_u64_le()?).unwrap_or(usize::MAX);
+    let _length = buf.try_get_u64_le()?;
     let msg_id = buf.try_get_u64_le()?;
     let third = buf.try_get_u64_le()?; // 命令的签名，回复的状态
     let fourth = buf.try_get_u64_le()?; // 命令的序列号，回复的签名
     match msg_id {
         GET_IP | GET_INFO if third == SIGNATURE => Err(DiscoveryError::Command),
         _ if third != OK || fourth != SIGNATURE => Err(DiscoveryError::Malformed),
-        GET_IP_REPLY if length == GET_IP_REPLY_LEN && datagram.len() == GET_IP_REPLY_LEN => {
-            get_ip_reply(buf, instances)
-        }
-        GET_INFO_REPLY if (GET_INFO_REPLY_LEN..=datagram.len()).contains(&length) => {
-            get_info_reply(buf, instances)?;
-            Ok(None)
-        }
+        GET_IP_REPLY => get_ip_reply(buf, instances),
+        GET_INFO_REPLY => get_info_reply(buf, instances).map(|()| None),
         _ => Err(DiscoveryError::Malformed),
     }
 }

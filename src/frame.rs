@@ -15,7 +15,20 @@
 
 use std::io::{self, Read};
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, TryGetError};
+
+/// 取出 `n` 字节的零拷贝切片，不够时报 `TryGetError`（各编解码器把它转成自己的“截断”错误）。帧与消息体里
+/// 所有按长度切片的读取都经过它，先检查再切，坏长度不会越界。
+pub(crate) fn take(buf: &mut Bytes, n: usize) -> Result<Bytes, TryGetError> {
+    if n <= buf.len() {
+        Ok(buf.split_to(n))
+    } else {
+        Err(TryGetError {
+            requested: n,
+            available: buf.len(),
+        })
+    }
+}
 
 /// [`FrameReader::read`] 的错误。出错后字节流已经错位，连接只能关闭。
 #[derive(Debug, thiserror::Error)]
@@ -129,7 +142,7 @@ mod tests {
     }
 
     // 增量读取约定：逐字节、穿插 WouldBlock 的输入得到与整块输入相同的帧，帧边界上的 EOF 是 None。
-    // 保留原因：真实 socket 上难以复现半帧，出错时静默丢字节、帧错位。
+    // 真实 socket 上难以复现半帧，出错时静默丢字节、帧错位。
     #[test]
     fn trickled_input_yields_the_same_frames() {
         let frames = [frame(b"ab"), frame(b""), frame(&[7; 300])];
@@ -152,7 +165,7 @@ mod tests {
     }
 
     // 内存安全约定：声明 4 GiB 的长度在分配之前报错。
-    // 保留原因：lint 只禁止 panic，拦不住按网络输入分配巨量内存。
+    // lint 只禁止 panic，拦不住按网络输入分配巨量内存。
     #[test]
     fn huge_length_is_rejected_before_allocation() {
         let huge = [0xFF_u8; 4];

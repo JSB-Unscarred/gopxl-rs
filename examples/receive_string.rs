@@ -14,7 +14,6 @@ fn main() -> common::Result {
 
     common::replay_enabled(client)?;
     common::enable_gdp(client)?;
-    println!("Connecting to Gocator Protocol...");
     let mut gdp = common::connect_gdp(&system)?;
     common::start_if_ready(&system)?;
 

@@ -10,8 +10,8 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
-use gopxl::control::Handle;
-use gopxl::value::Value;
+use gopxl::Value;
+use gopxl::resource::rel;
 
 const TOOLS_PATH: &str = "/tools/";
 /// 改名后的 extId；以 `extId=` 访问工具，不依赖服务端分配的 ID。
@@ -29,25 +29,20 @@ fn main() -> common::Result {
     println!("\nAdding new tool: {}...", payload["type"]);
     client.create(TOOLS_PATH, payload).response()?;
 
-    let tools = client.read(TOOLS_PATH).response()?.payload;
-    let tool_path = tools
-        .pointer("/_embedded/item/0/_links/self/href")
-        .and_then(Value::as_str)
-        .ok_or("/tools has no item")?;
+    let tools = system.resource(TOOLS_PATH).child_paths(rel::ITEM)?;
+    let tool_path = tools.first().ok_or("/tools has no item")?;
 
-    let tool = client.read(tool_path).response()?.payload;
-    let use_region = tool
-        .pointer("/parameters/UseRegion")
-        .and_then(Value::as_bool)
-        .ok_or("tool has no parameters/UseRegion")?;
+    let use_region = common::read_at(client, tool_path, "/parameters/UseRegion")?
+        .as_bool()
+        .ok_or("UseRegion is not a boolean")?;
     if use_region {
         println!("\nTool region already enabled.");
     } else {
         println!("\nEnabling tool region...");
         let payload = r#"{"parameters":{"UseRegion":true}}"#.parse::<Value>()?;
         client.update(tool_path, payload).response()?;
-        let tool = client.read(tool_path).response()?.payload;
-        println!("Tool ID: {}", common::text(&tool["id"]));
+        let id = common::read_at(client, tool_path, "/id")?;
+        println!("Tool ID: {}", common::text(&id));
     }
 
     println!("\nUpdating tool ID...");
@@ -61,18 +56,16 @@ fn main() -> common::Result {
         .parse::<Value>()?;
     client.update(TOOL_PATH, payload).response()?;
 
-    print_items(client, "Data sources", "/dataSources/")?;
-    print_items(client, "Tool inputs", &format!("{TOOL_PATH}/inputs"))?;
+    let data_sources = system.resource("/dataSources/").child_paths(rel::ITEM)?;
+    common::print_paths("Data sources", &data_sources);
+    let inputs = system
+        .resource(format!("{TOOL_PATH}/inputs"))
+        .child_paths(rel::ITEM)?;
+    common::print_paths("Tool inputs", &inputs);
 
     println!("\nConnecting tool input...");
-    // G5（共焦线）传感器的数据源带 `Layer0` 后缀。
     let mut payload = Value::object();
-    let profile = format!(
-        "scan:{}:{}:topUniformProfile",
-        common::ENGINE_ID,
-        common::SCANNER_ID
-    );
-    payload.set("dataSource", profile)?;
+    payload.set("dataSource", common::scan_source("topUniformProfile"))?;
     client
         .update(&format!("{TOOL_PATH}/inputs/ProfileInput"), payload)
         .response()?;
@@ -98,18 +91,5 @@ fn main() -> common::Result {
     // 输出 X 的数据源 ID：新工具是第一个 Profile Bounding Box，ID 为 `-0`。
     println!("\nAdding measurement value to output...");
     common::add_output(client, "tools:ProfileBoundingBox-0:outputs:X", 1)?;
-    Ok(())
-}
-
-/// 读集合 `path`，打印 `_embedded.item` 各条目的 `_links.self.href`。
-fn print_items(client: &Handle, title: &str, path: &str) -> common::Result {
-    let collection = client.read(path).response()?.payload;
-    println!("\n{title}:");
-    for item in collection["_embedded"]["item"]
-        .as_array()
-        .unwrap_or_default()
-    {
-        println!("{}", common::text(&item["_links"]["self"]["href"]));
-    }
     Ok(())
 }

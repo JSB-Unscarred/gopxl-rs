@@ -17,7 +17,7 @@ use common::{
     SCANNER_PATH, SENSOR_PATH, SINGLE_EXPOSURE_PATH, TRIGGER_MODE_SOFTWARE, TRIGGER_SOURCE_PATH,
     section, trigger_event_name,
 };
-use gopxl::resource::{Resource, rel};
+use gopxl::resource::rel;
 use gopxl::{System, Value};
 
 fn main() -> common::Result {
@@ -87,9 +87,14 @@ fn configure_digital_output(system: &System) -> common::Result {
     println!("Enabling Digital Output...");
     digital_output.set("/enabled", true)?;
 
+    // 设备列表为空时加入第一个可用设备（C++ 的 `ChildCount` 与 `CreateChild`）。
     let mut devices = digital_output.child("devices");
-    add_device_if_empty(&digital_output, &mut devices)
-        .inspect_err(|_| eprintln!("Check if API path and device are valid."))?;
+    if devices.child_paths(rel::ITEM)?.is_empty() {
+        println!("\nAdding device to Digital Output...");
+        let mut available = digital_output.child("availableDevices");
+        let device = available.get("/devices/0", Some)?.clone();
+        devices.create_child(device)?;
+    }
 
     // 添加过设备时缓存已过期，这里重新读设备列表。
     let paths = devices.child_paths(rel::ITEM)?;
@@ -121,17 +126,6 @@ fn configure_digital_output(system: &System) -> common::Result {
     if let Err(e) = port.command("trigger", args).response() {
         eprintln!("Error: {e}");
         eprintln!("Failed to trigger continuous scheduled pulse.");
-    }
-    Ok(())
-}
-
-/// 集合 `devices` 为空时，把 `availableDevices` 的第一个设备加进去（C++ 的 `ChildCount` 与 `CreateChild`）。
-fn add_device_if_empty(digital_output: &Resource, devices: &mut Resource) -> common::Result {
-    if devices.child_paths(rel::ITEM)?.is_empty() {
-        println!("\nAdding device to Digital Output...");
-        let mut available = digital_output.child("availableDevices");
-        let device = available.get("/devices/0", Some)?.clone();
-        devices.create_child(device)?;
     }
     Ok(())
 }

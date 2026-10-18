@@ -10,7 +10,7 @@ use socket2::{SockRef, TcpKeepalive};
 use crate::control::DisconnectReason;
 use crate::error::{Error, Result};
 
-/// 写超时：与服务端的 10 s 写超时对称（协议假设 C2）。超时或只写出半帧后连接不再可用，由调用方拆掉。
+/// 写超时：与服务端的 10 s 写超时对称（协议假设 C1）。超时或只写出半帧后连接不再可用，由调用方拆掉。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// keepalive：空闲 30 s 后每 10 s 探测一次。只等通知或流数据的连接没有写出，断电的设备只能靠它发现。
@@ -27,7 +27,7 @@ pub(crate) const MAX_FRAME: u32 = if usize::BITS >= 64 {
 };
 
 /// 建立 TCP 连接：`TCP_NODELAY`（请求是小帧，SDK 从不设置）、keepalive 与写超时；读不设超时。
-/// 端口 0 报 `InvalidArgument`（C++ 直接把 0 交给 socket，重写方案 §5.4 第 14 条）。
+/// 端口 0 报 `InvalidArgument`（C++ 直接把 0 交给 socket）。
 pub(crate) fn connect(addr: SocketAddr, timeout: Duration) -> Result<TcpStream> {
     if addr.port() == 0 {
         return Err(Error::InvalidArgument(format!("port of {addr} is 0")));
@@ -46,8 +46,8 @@ pub(crate) fn connect(addr: SocketAddr, timeout: Duration) -> Result<TcpStream> 
 ///
 /// 句柄 Drop 时 [`shutdown`](Self::shutdown)：之后的读写立即失败，对端收到 FIN。阻塞在 recv 上的读线程在 Linux
 /// 上随即返回；Windows 上 shutdown 唤不醒它，要等对端关闭连接或再发数据（控制通道的服务端读到 EOF 即关闭连接，
-/// 协议假设 C3），读线程这时退出并释放 socket。句柄不 join，所以 Drop 从不阻塞（C++ 先 join 后 shutdown，读线程卡在
-/// 半帧中时永远挂住，重写方案 §5.4 第 3 条）。读线程退出前用 [`finish`](Self::finish) 记下原因，再丢弃通道的发送端，
+/// 协议假设 C2），读线程这时退出并释放 socket。句柄不 join，所以 Drop 从不阻塞（C++ 先 join 后 shutdown，读线程卡在
+/// 半帧中时永远挂住）。读线程退出前用 [`finish`](Self::finish) 记下原因，再丢弃通道的发送端，
 /// 句柄看到通道断开时总能取到原因。
 #[derive(Debug)]
 pub(crate) struct Link {

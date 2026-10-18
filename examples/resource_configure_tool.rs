@@ -21,8 +21,6 @@ const DATA_SOURCES_PATH: &str = "/dataSources";
 const TOOL_TYPE: &str = "ProfileBoundingBox";
 /// 改名后的 extId。
 const TOOL_ID: &str = "ProfileBoundingBox-demo";
-const GOCATOR_CONTROL_PATH: &str = "/controls/gocator";
-const GOCATOR_ADD_OUTPUT_PATH: &str = "/controls/gocator/outputs/commands/add";
 
 fn main() -> common::Result {
     let system = common::connect()?;
@@ -51,19 +49,14 @@ fn main() -> common::Result {
     tool.update(patch.parse::<Value>()?)?;
 
     let data_sources = system.resource(DATA_SOURCES_PATH).child_paths(rel::ITEM)?;
-    print_paths("Data sources", &data_sources);
+    common::print_paths("Data sources", &data_sources);
 
     let mut profile_input = tool.child("inputs/ProfileInput");
     println!("\nConnecting tool input at {}...", profile_input.path());
-    let profile = format!(
-        "scan:{}:{}:topUniformProfile",
-        common::ENGINE_ID,
-        common::SCANNER_ID
-    );
-    profile_input.set("/dataSource", profile)?;
+    profile_input.set("/dataSource", common::scan_source("topUniformProfile"))?;
 
     let inputs = tool.child("inputs").child_paths(rel::ITEM)?;
-    print_paths("Tool inputs", &inputs);
+    common::print_paths("Tool inputs", &inputs);
 
     let mut output = tool.child("outputs/X");
     println!("\nEnabling measurement output at {}...", output.path());
@@ -77,29 +70,10 @@ fn main() -> common::Result {
         Err(e) => println!("Note: Could not read measurement value ({e})"),
     }
 
-    println!("\nEnabling Gocator Protocol...");
-    system
-        .resource(GOCATOR_CONTROL_PATH)
-        .set("/enabled", true)?;
+    common::enable_gdp(system.client())?;
 
     // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段（协议假设 R2）。
     let tool_id = tool.path().rsplit('/').next().unwrap_or_default();
-    let mut args = Value::object();
-    args.set("source", format!("tools:{tool_id}:outputs:X"))?;
-    args.set("outputId", 1)?;
-    args.set("autoShift", true)?;
     println!("Adding measurement value to output...");
-    system
-        .resource(GOCATOR_ADD_OUTPUT_PATH)
-        .call(args)
-        .response()?;
-    Ok(())
-}
-
-/// 打印标题与各子资源路径（C++ 遍历 `ChildUris` 的循环）。
-fn print_paths(title: &str, paths: &[String]) {
-    println!("\n{title}:");
-    for path in paths {
-        println!("  {path}");
-    }
+    common::add_output(system.client(), &format!("tools:{tool_id}:outputs:X"), 1)
 }

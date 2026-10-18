@@ -15,7 +15,7 @@
 //! - 读取经过 `bytes::Buf` 的 `try_get_*` 与带长度检查的切片，下面的 lint 禁止下标与 unwrap，读线程不会因为坏消息 panic。
 //!
 //! CAS 之后的部分解析失败时消息仍然返回（[`Body::Invalid`]），`cas.is_last_msg` 照样能结束数据集；未知类型
-//! 也解析 CAS（C++ 跳过整条消息，丢掉 `isLastMsg` 使两个数据集合并，重写方案 §5.4 第 22 条）。
+//! 也解析 CAS（C++ 跳过整条消息，丢掉 `isLastMsg` 使两个数据集合并）。
 //!
 //! 零拷贝：`u8` 数据（强度、图像像素、Mesh 纹理与用户通道、未知类型的消息体）是帧的切片，持有它们会让整帧存活；
 //! 多字节数组解码为 `Vec`。文本按字节数读取并保留内嵌 NUL，非法 UTF-8 替换为 U+FFFD。
@@ -40,6 +40,7 @@ use std::mem;
 use bytes::{Buf, Bytes, TryGetError};
 
 use crate::control::Status;
+use crate::frame::take;
 
 pub use client::{GdpClient, RecvError};
 pub use image::{Image, PixelFormat};
@@ -109,7 +110,7 @@ pub struct Cas {
     /// 是否为数据集的最后一条消息，接收端据此结束一个数据集。
     pub is_last_msg: bool,
     /// 输出 ID（`/controls/gocator/outputs` 的 `outputId`，0 有效）。旧服务端的 CAS 不含此字段，或值为 0xFFFF（未使用）
-    /// 时为 `None`（C++ 总是读取，短 CAS 会读进类型相关部分并失败，重写方案 §5.4 第 27 条）。
+    /// 时为 `None`（C++ 总是读取，短 CAS 会读进类型相关部分并失败）。
     pub gdp_id: Option<u16>,
 }
 
@@ -189,7 +190,7 @@ pub struct Measurement {
 /// 字符串（类型 20，`GoGdpString`），字段直接跟在 CAS 之后。
 #[derive(Clone, Debug, PartialEq)]
 pub struct GdpString {
-    /// 文本，按字节数读取，保留内嵌 NUL（C++ 在 NUL 处截断，重写方案 §5.4 第 26 条）。
+    /// 文本，按字节数读取，保留内嵌 NUL（C++ 在 NUL 处截断）。
     pub text: String,
     /// 判定（1.5 新增，目前未使用）；剩余 0 字节时为 0。
     pub decision: u8,
@@ -364,15 +365,6 @@ fn section(buf: &mut Bytes, width: usize) -> Result<Bytes, GdpError> {
         .ok_or(GdpError::Malformed)
 }
 
-/// 取出 `n` 字节的零拷贝切片。
-fn take(buf: &mut Bytes, n: usize) -> Result<Bytes, GdpError> {
-    if n <= buf.len() {
-        Ok(buf.split_to(n))
-    } else {
-        Err(GdpError::Truncated)
-    }
-}
-
 /// 两个尺寸的乘积。溢出时数据不可能放进消息，按截断处理（C++ 用 32 位回绕的乘法）。
 fn product(a: usize, b: usize) -> Result<usize, GdpError> {
     a.checked_mul(b).ok_or(GdpError::Truncated)
@@ -448,7 +440,5 @@ fn read_bool(buf: &mut Bytes) -> Result<bool, TryGetError> {
 /// 读取以 `width` 字节小端长度开头的文本（线上不带结尾 NUL），保留全部字节，非法 UTF-8 替换为 U+FFFD。
 fn text(buf: &mut Bytes, width: usize) -> Result<String, GdpError> {
     let len = usize::try_from(buf.try_get_uint_le(width)?).unwrap_or(usize::MAX);
-    let text = String::from_utf8_lossy(buf.get(..len).ok_or(GdpError::Truncated)?).into_owned();
-    buf.advance(len);
-    Ok(text)
+    Ok(String::from_utf8_lossy(&take(buf, len)?).into_owned())
 }

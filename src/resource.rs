@@ -3,7 +3,7 @@
 //!
 //! 写入就是发送一个补丁：[`Resource::update`] 发送调用方构建的补丁，[`Resource::set`] 是只含一个值的补丁。没有
 //! C++ 的延迟写与 `GoUpdateScope`：它们共享一个待发补丁，`Flush` 失败时补丁丢失，作用域的异常路径清掉外层作用域
-//! 的改动（重写方案 §5.4 第 35 条）。
+//! 的改动。
 
 use std::fmt;
 use std::slice;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::control::{Handle, Method, Request, Status, Subscription, Transaction};
 use crate::error::{Error, Result};
-use crate::schema::{self, Issue};
+use crate::schema;
 use crate::value::{Map, Value};
 
 /// HAL 关系名，对应 C++ 的 `GoRelationType`。
@@ -37,7 +37,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`Resource::new`] 或父资源的 `child`、`children`、`create_child` 得到。
 ///
 /// owned、`Send`，唯一拥有自己的缓存与订阅。Drop 时订阅随之释放，写出 `unSub`、不等应答（C++ 的析构等待应答，
-/// 最多阻塞 5 s，§5.4 第 44 条）。不让连接存活：`System` Drop 之后，请求以 `Disconnected` 失败。
+/// 最多阻塞 5 s）。不让连接存活：`System` Drop 之后，请求以 `Disconnected` 失败。
 pub struct Resource {
     handle: Handle,
     path: String,
@@ -48,7 +48,7 @@ pub struct Resource {
     data: Option<Value>,
     /// 发出读取 `data` 的请求之前连接的写计数（`Handle::write_count`）。
     epoch: u64,
-    /// `_schema` 缓存，与 `data` 分开（C++ 读 schema 时用不展开的数据覆盖数据缓存，§5.4 第 36 条）。
+    /// `_schema` 缓存，与 `data` 分开（C++ 读 schema 时用不展开的数据覆盖数据缓存）。
     schema: Option<Value>,
     subscription: Option<Subscription>,
 }
@@ -212,7 +212,7 @@ impl Resource {
 
     /// 用 `pointer` 处的 schema 节点校验 `value`，不发送，对应 C++ 的 `Validate`；空表即通过，schema 中没有这个
     /// 位置时不约束。用的是缓存的 schema，设备状态改变之后可能过期，需要时先 [`invalidate`](Self::invalidate)。
-    pub fn validate(&mut self, pointer: &str, value: &Value) -> Result<Vec<Issue>> {
+    pub fn validate(&mut self, pointer: &str, value: &Value) -> Result<Vec<String>> {
         let node = schema::schema_for_path(self.schema()?, pointer);
         Ok(node
             .map(|node| schema::validate(value, node))
@@ -220,12 +220,10 @@ impl Resource {
     }
 
     /// 相对路径 `path` 处的子资源，不发请求，对应 C++ 的 `Child`：去掉本路径末尾与 `path` 开头的 `/` 后以 `/`
-    /// 连接。子资源继承超时与校验设置。
+    /// 连接（`command`、`action`、`subscribe` 同样拼接）。子资源继承超时与校验设置。
     #[must_use]
     pub fn child(&self, path: &str) -> Resource {
-        let base = self.path.strip_suffix('/').unwrap_or(&self.path);
-        let path = path.strip_prefix('/').unwrap_or(path);
-        self.derive(format!("{base}/{path}"))
+        self.derive(self.join(path))
     }
 
     /// `_embedded` 中关系 `rel`（见 [`rel`]）各条目的 `_links.self.href`，对应 C++ 的 `ChildUris`；`ChildCount` 即
@@ -240,7 +238,7 @@ impl Resource {
     ///
     /// 展开层级不为 0 时条目就是子资源的数据（服务端按请求的 `expandLevel` 展开），直接放进子资源的缓存，子资源的
     /// 展开层级取服务端渲染条目用的下一层（−1 不变，n > 0 为 n − 1，其他为 0，协议假设 R1），缓存与层级一致。C++ 按
-    /// 条目的键数猜测是否已展开，把带 `ordIndex` 的链接也当作数据放进缓存（§5.4 第 33 条）。
+    /// 条目的键数猜测是否已展开，把带 `ordIndex` 的链接也当作数据放进缓存。
     pub fn children(&mut self, rel: &str) -> Result<Vec<Resource>> {
         let expanded = self.expand_level != 0;
         let expand_level = match self.expand_level {
@@ -266,9 +264,9 @@ impl Resource {
     pub fn create_child(&self, args: impl Into<Value>) -> Result<Resource> {
         let response = self.handle.create(&self.path, args);
         let payload = response.timeout(self.timeout).response()?.payload;
-        let path = ["/path", "/_links/self/href"]
+        let path = [payload["path"].as_str(), href(&payload)]
             .into_iter()
-            .filter_map(|pointer| payload.pointer(pointer)?.as_str())
+            .flatten()
             .find(|path| !path.is_empty())
             .ok_or_else(|| Error::Payload {
                 path: self.path.clone(),
@@ -300,13 +298,13 @@ impl Resource {
 
     /// 调用命令 `<路径>/commands/<name>`，对应 C++ 的 `CallCommand`；超时同 [`call`](Self::call)。
     pub fn command(&self, name: &str, args: impl Into<Value>) -> Transaction {
-        let path = format!("{}/commands/{name}", self.path);
+        let path = self.join(&format!("commands/{name}"));
         self.handle.call(&path, args).timeout(self.timeout)
     }
 
     /// 调用动作 `<路径>/actions/<name>`，对应 C++ 的 `CallAction`；超时同 [`call`](Self::call)。
     pub fn action(&self, name: &str, args: impl Into<Value>) -> Transaction {
-        let path = format!("{}/actions/{name}", self.path);
+        let path = self.join(&format!("actions/{name}"));
         self.handle.call(&path, args).timeout(self.timeout)
     }
 
@@ -324,16 +322,25 @@ impl Resource {
     /// 订阅本资源及其后代的变更（表达式 `<路径>/*`），对应 C++ 的 `Subscribe`；已订阅时什么也不做。之后其他客户端与
     /// 设备自身的修改也会使缓存过期。
     ///
-    /// C++ 订阅精确路径，收不到子项的 `created` / `deleted`（§5.4 第 40 条；`*` 的投递是协议假设 S3）。通知总是带
+    /// C++ 订阅精确路径，收不到子项的 `created` / `deleted`（`*` 的投递是协议假设 S3）。通知总是带
     /// 规范路径，所以以 `extId=` 访问的资源、不是规范路径（不以 `/` 开头或有空段）的资源都收不到通知：订阅
     /// `create_child`、`children` 得到的资源。订阅之前的修改没有通知，所以订阅时丢弃数据缓存。
     pub fn subscribe(&mut self) -> Result<()> {
         if self.subscription.is_none() {
-            let expr = format!("{}/*", self.path.trim_end_matches('/'));
-            self.subscription = Some(self.handle.subscribe(&expr)?);
+            self.subscription = Some(self.handle.subscribe(&self.join("*"))?);
             self.data = None;
         }
         Ok(())
+    }
+
+    /// 本路径下的相对路径 `rel`：去掉本路径末尾与 `rel` 开头的 `/` 后以 `/` 连接。`child`、`command`、`action` 与
+    /// `subscribe` 都经它拼路径，带尾部 `/` 的路径（`/tools/`）也得到规范路径。
+    fn join(&self, rel: &str) -> String {
+        format!(
+            "{}/{}",
+            self.path.trim_end_matches('/'),
+            rel.trim_start_matches('/')
+        )
     }
 
     /// 取消订阅，对应 C++ 的 `Unsubscribe`：丢弃订阅，写出 `unSub`、不等应答。先取空队列，已到达的通知照样使缓存过期。
@@ -404,8 +411,8 @@ impl fmt::Debug for Resource {
     }
 }
 
-/// 一个 rel 的条目：数组的元素，或单个对象本身；`[]`、nil 与缺失都没有条目。服务端只有一个引用时写出单个对象
-/// （重写方案 §1.4.10），C++ 当作没有条目（§5.4 第 34 条）。
+/// 一个 rel 的条目：数组的元素，或单个对象本身；`[]`、nil 与缺失都没有条目。服务端只有一个引用时写出单个对象，
+/// C++ 当作没有条目。
 fn entries(rel: &Value) -> &[Value] {
     match rel {
         Value::Array(items) => items,
@@ -423,7 +430,7 @@ fn href(item: &Value) -> Option<&str> {
 ///
 /// 对象逐键深入，其余的值（包括数组：服务端整体替换数组）按所在位置的 schema 节点校验，与 C++ 逐个 `Set*` 校验
 /// 的值相同；对象本身不校验，补丁只含要修改的属性，`required` 不适用。schema 中没有的位置不约束。
-fn first_invalid(schema: &Value, value: &Value, pointer: &str) -> Option<(String, Vec<Issue>)> {
+fn first_invalid(schema: &Value, value: &Value, pointer: &str) -> Option<(String, Vec<String>)> {
     let Value::Map(map) = value else {
         let issues = schema::validate(value, schema::schema_for_path(schema, pointer)?);
         return (!issues.is_empty()).then(|| (pointer.to_owned(), issues));
@@ -434,11 +441,10 @@ fn first_invalid(schema: &Value, value: &Value, pointer: &str) -> Option<(String
     })
 }
 
-// 保留原因：补丁逐值校验是自有算法（C++ 只校验单个 Set 的值、不校验 SetJson），无法与官方实现对照。
+// 补丁逐值校验是自有算法（C++ 只校验单个 Set 的值、不校验 SetJson），无法与官方实现对照。
 #[cfg(test)]
 mod tests {
     use super::first_invalid;
-    use crate::schema::Issue;
     use crate::value::Value;
 
     // 约定：对象逐键深入，键按 RFC 6901 转义；对象以外的值（数组整体）按所在位置校验，报告第一个不合格的值及其
@@ -458,19 +464,19 @@ mod tests {
         assert_eq!(check(r#"{"unknown":{"deep":1}}"#), None);
         assert_eq!(
             check(r#"{"a/b~":"x"}"#),
-            Some(("/a~1b~0".to_owned(), vec![Issue::Type("integer".into())]))
+            Some(("/a~1b~0".to_owned(), vec!["type \"integer\"".to_owned()]))
         );
         assert_eq!(
             check(r#"{"id":"x"}"#),
-            Some(("/id".to_owned(), vec![Issue::ReadOnly]))
+            Some(("/id".to_owned(), vec!["readOnly".to_owned()]))
         );
         assert_eq!(
             check(r#"{"list":[1,2,3],"n":11}"#),
-            Some(("/list".to_owned(), vec![Issue::MaxItems(2)]))
+            Some(("/list".to_owned(), vec!["maxItems 2".to_owned()]))
         );
         assert_eq!(
             check(r#"{"obj":5}"#),
-            Some(("/obj".to_owned(), vec![Issue::Type("object".into())]))
+            Some(("/obj".to_owned(), vec!["type \"object\"".to_owned()]))
         );
     }
 }

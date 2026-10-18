@@ -91,6 +91,9 @@ fn print_sensors(system: &System) -> common::Result {
         );
     }
 
+    // 网卡配置属于本实例，与传感器无关，读一次。
+    let ip_config = client.read(common::IP_CONFIG_PATH).response()?.payload;
+    let interface = &ip_config["interfaces"][0];
     let mut count = 0;
     for sensor in sensors {
         let serial = sensor["serialNumber"]
@@ -99,8 +102,6 @@ fn print_sensors(system: &System) -> common::Result {
         let Some(sensor_path) = system.sensor_path(serial)? else {
             continue;
         };
-        let ip_config = client.read(common::IP_CONFIG_PATH).response()?.payload;
-        let interface = &ip_config["interfaces"][0];
         count += 1;
         println!("\n{} Sensor {count}", "*".repeat(22));
         println!(

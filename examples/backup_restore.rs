@@ -9,10 +9,7 @@
 mod common;
 
 use gopxl::Value;
-use gopxl::control::{Method, Request};
 
-const BACKUP_PATH: &str = "/system/commands/archive";
-const RESTORE_PATH: &str = "/system/commands/restore";
 const BACKUP_FILE: &str = "sample_backup.gpbak";
 
 fn main() -> common::Result {
@@ -25,29 +22,8 @@ fn main() -> common::Result {
         .parse::<Value>()?;
 
     println!("Receiving backup data...");
-    let archive = Request {
-        payload: contents.clone(),
-        ..Request::new(Method::Call, BACKUP_PATH)
-    };
-    let response = client.transfer(archive, common::RECEIVE_TIMEOUT)?;
-    let data = response.payload["data"]
-        .as_bytes()
-        .ok_or("archive response has no binary \"data\"")?;
-
-    println!("Downloading backup file...");
-    let backup_file = std::path::absolute(BACKUP_FILE)?;
-    std::fs::write(&backup_file, data)?;
-    println!("File location: {}", backup_file.display());
-    // 归档可能超过 1 GiB，恢复期间不再占着下载的那一份。
-    drop(response);
+    let backup_file = common::download_archive(client, &contents, BACKUP_FILE)?;
 
     println!("Restoring system...");
-    let mut restore = Request {
-        payload: contents,
-        ..Request::new(Method::Call, RESTORE_PATH)
-    };
-    restore.payload.set("data", std::fs::read(&backup_file)?)?;
-    println!("Restoring system from {}...", backup_file.display());
-    client.transfer(restore, common::EXTENDED_TIMEOUT)?;
-    Ok(())
+    common::restore_archive(client, contents, &backup_file)
 }

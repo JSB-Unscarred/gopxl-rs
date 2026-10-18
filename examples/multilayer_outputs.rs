@@ -8,11 +8,8 @@
 
 mod common;
 
-use common::NULL;
-use gopxl::System;
-use gopxl::control::Handle;
 use gopxl::gdp::{Body, GdpClient, Message};
-use gopxl::value::Value;
+use gopxl::{System, Value};
 
 /// 清空 GDP 输出表。
 const REMOVE_ALL_OUTPUTS_PATH: &str = "/controls/gocator/outputs/commands/removeAll";
@@ -27,19 +24,22 @@ fn main() -> common::Result {
     println!("Enabling uniform spacing...");
     let spacing = r#"{"parameters":{"scanModeSettings":{
         "uniformSpacingEnabled":true,"individualLayersEnabled":false}}}"#;
-    update(client, common::SCANNER_PATH, spacing)?;
+    client
+        .update(common::SCANNER_PATH, spacing.parse::<Value>()?)
+        .response()?;
 
     common::enable_gdp(client)?;
-    println!("Connecting to Gocator Protocol...");
     let mut gdp = common::connect_gdp(&system)?;
 
     println!("Configuring sensor for single profile layer output...");
     let single = r#"{"parameters":{"layerSettings":{"layerCount":1}}}"#;
-    update(client, common::SENSOR_PATH, single)?;
+    client
+        .update(common::SENSOR_PATH, single.parse::<Value>()?)
+        .response()?;
     // individualLayersEnabled 为 false 时各层只合并为数组输出（见手册），没有 `...Layer0` 数据源；层数为 1 的
     // 数组即单个轮廓，所以与 C++ 一样添加数组。
     println!("Adding single profile to GDP output...");
-    common::add_output(client, &source("UniformProfileArray"), 0)?;
+    common::add_output(client, &common::scan_source("topUniformProfileArray"), 0)?;
     receive(&system, &mut gdp)?;
     system.stop()?;
     println!("System stopped.");
@@ -49,22 +49,30 @@ fn main() -> common::Result {
         .response()?;
     println!("Configuring sensor for multiple layer profile array output...");
     let multiple = r#"{"parameters":{"layerSettings":{"layerCount":8}}}"#;
-    update(client, common::SENSOR_PATH, multiple)?;
+    client
+        .update(common::SENSOR_PATH, multiple.parse::<Value>()?)
+        .response()?;
     println!("Adding array of profiles to GDP output...");
-    common::add_output(client, &source("UniformProfileArray"), 0)?;
+    common::add_output(client, &common::scan_source("topUniformProfileArray"), 0)?;
     receive(&system, &mut gdp)?;
     system.stop()?;
     println!("System stopped.");
 
     println!("Configuring sensor for multiple layer separated profile output...");
     let separated = r#"{"parameters":{"scanModeSettings":{"individualLayersEnabled":true}}}"#;
-    update(client, common::SCANNER_PATH, separated)?;
+    client
+        .update(common::SCANNER_PATH, separated.parse::<Value>()?)
+        .response()?;
     client
         .call(REMOVE_ALL_OUTPUTS_PATH, Value::object())
         .response()?;
     for layer in 0..8 {
         println!("Adding profile layer {layer} to GDP output...");
-        common::add_output(client, &source(&format!("UniformProfileLayer{layer}")), 0)?;
+        common::add_output(
+            client,
+            &common::scan_source(&format!("topUniformProfileLayer{layer}")),
+            0,
+        )?;
     }
     receive(&system, &mut gdp)?;
 
@@ -72,21 +80,6 @@ fn main() -> common::Result {
     system.stop()?;
     println!("System stopped.");
     Ok(())
-}
-
-/// 以 JSON 文本 `json` 更新 `path`。
-fn update(client: &Handle, path: &str, json: &str) -> common::Result {
-    client.update(path, json.parse::<Value>()?).response()?;
-    Ok(())
-}
-
-/// 扫描器顶部传感器的数据源 `top<name>`。
-fn source(name: &str) -> String {
-    format!(
-        "scan:{}:{}:top{name}",
-        common::ENGINE_ID,
-        common::SCANNER_ID
-    )
 }
 
 /// 就绪时启动设备，接收并打印一个数据集，对应 C++ 每个阶段末尾的 `Start`、`ReceiveData` 与 `TransformDataSet`。
@@ -116,36 +109,12 @@ fn receive(system: &System, gdp: &mut GdpClient) -> common::Result {
 
 /// 打印时间戳，或把轮廓换算为毫米坐标并打印点数，对应 C++ 的 `TransformDataSet`。
 fn print_message(message: &Message) {
-    let cas = &message.cas;
-    match &message.body {
-        Body::Stamp(stamp) => {
-            common::print_cas("Stamp", cas);
-            println!("Frame index: {}", stamp.frame_index);
-            println!("\tTimestamp: {}", stamp.timestamp);
-            println!("\tEncoder: {}", stamp.encoder);
-        }
-        Body::UniformProfile(profile) => {
-            common::print_cas("Uniform Profile", cas);
-            // 统一轮廓只发送 z，x 由点的下标换算。
-            let points: Vec<[f64; 2]> = (0u32..)
-                .zip(&profile.ranges)
-                .filter(|&(_, &z)| z != NULL)
-                .map(|(x, &z)| common::profile_mm(&profile.attrs, [x.into(), z.into()]))
-                .collect();
-            println!("Profile points count: {}", profile.ranges.len());
-            println!("Valid points count: {}", points.len());
-        }
-        Body::ProfilePointCloud(profile) => {
-            common::print_cas("Point Cloud Profile", cas);
-            let points: Vec<[f64; 2]> = profile
-                .points
-                .iter()
-                .filter(|&&[x, _]| x != NULL)
-                .map(|point| common::profile_mm(&profile.attrs, point.map(f64::from)))
-                .collect();
-            println!("Received range points count: {}", profile.points.len());
-            println!("Valid points count: {}", points.len());
-        }
-        _ => println!("No profile or stamp found in the message."),
+    if let Body::Stamp(stamp) = &message.body {
+        common::print_cas("Stamp", &message.cas);
+        println!("Frame index: {}", stamp.frame_index);
+        println!("\tTimestamp: {}", stamp.timestamp);
+        println!("\tEncoder: {}", stamp.encoder);
+    } else if !common::print_profile(message) {
+        println!("No profile or stamp found in the message.");
     }
 }

@@ -11,8 +11,8 @@
 
 mod common;
 
+use gopxl::Value;
 use gopxl::control::Client;
-use gopxl::value::Value;
 
 /// 扫描器的图像输出，`dataSourceId` 即要加入 GDP 输出的数据源。
 const IMAGE_OUTPUT_PATH: &str = "/scan/engines/2dscanner/scanners/scanner-0/outputs/image";
@@ -72,7 +72,6 @@ fn main() -> common::Result {
     println!("{source}");
     common::add_output(client, source, 0)?;
 
-    println!("Connecting to Gocator Protocol...");
     let mut gdp = common::connect_gdp(&system)?;
     common::start_if_ready(&system)?;
 

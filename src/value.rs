@@ -1,6 +1,6 @@
 //! 动态值：控制通道消息体的内存表示，取代 C++ SDK 的 `GoJson`（`nlohmann::json` 3.8.0 的包装）。
 //!
-//! 与 `GoJson` 的差异都用来修掉它的缺陷（重写方案 §5.4 第 15 条）：
+//! 与 `GoJson` 的差异都用来修掉它的缺陷：
 //! - 值语义：`Clone` 是深拷贝，不存在赋值后共享存储；读取（[`Value::pointer`]、`Index`、`as_*`）不修改文档；
 //! - [`Value::set`] / [`Value::remove`] 直接操作树，不经过 flatten，不会把空容器变成 null、把数组变成对象，
 //!   删除数组元素时后面的元素前移而不是留下 null。
@@ -292,13 +292,6 @@ from_lossless! {
 impl From<u64> for Value {
     fn from(v: u64) -> Self {
         i64::try_from(v).map_or(Self::UInt(v), Self::Int)
-    }
-}
-
-/// `None` 为 `Nil`。
-impl<T: Into<Value>> From<Option<T>> for Value {
-    fn from(v: Option<T>) -> Self {
-        v.map_or(Self::Nil, Into::into)
     }
 }
 

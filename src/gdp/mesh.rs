@@ -128,7 +128,7 @@ mod tests {
 
     // 内存安全约定：声明巨大 allocateCount 的通道在分配之前报 Truncated，CAS 仍然有效。检查的是所有 GDP 数组共用的
     // `read_vec` / `take`：先确认字节够再分配。
-    // 保留原因：lint 只禁止 panic，拦不住按网络输入分配巨量内存。
+    // lint 只禁止 panic，拦不住按网络输入分配巨量内存。
     #[test]
     fn huge_allocate_count_is_truncated() {
         let mut bytes = hex(F18);

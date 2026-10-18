@@ -7,7 +7,7 @@
 //! 退出；`System::resource` 总是开启校验，取代 `GoResourceManager` 的 `AutoValidation`，省去打印它的一行，小节标题
 //! 与捕获信息不再提 C++ 的类型名，扫描器的两步共用一个 `Resource`（C++ 的管理器对同一路径返回同一对象）；写入 99
 //! 校验失败时先重读一次 schema 再报错（schema 随设备状态变化，C++ 直接按缓存的 schema 报错）；问题与错误消息的
-//! 文本取自 `schema::Issue` 与 `Error::Validation`，措辞与 C++ 不同；三次 `validate` 都打印问题（C++ 第一次不打印）；
+//! 文本取自 `schema::validate` 与 `Error::Validation`，措辞与 C++ 不同；三次 `validate` 都打印问题（C++ 第一次不打印）；
 //! 顶层属性的 `type` 不是字符串（可空类型写作数组）时打印其 JSON 文本（C++ 的 `Get<string>` 抛异常退出）。
 
 mod common;

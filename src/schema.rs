@@ -11,55 +11,12 @@
     clippy::panic
 )]
 
+use std::fmt;
+
 use crate::value::{Value, array_index, tokens};
 
 /// 浮点比较的容差，与 C++ 相同。
 const EPSILON: f64 = 1e-9;
-
-/// 校验发现的一个问题，对应 `GoResourceValidationError::Errors()` 中的一条。
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum Issue {
-    /// `readOnly` 为真。
-    #[error("property is read-only")]
-    ReadOnly,
-    /// 类型不符，携带 schema 的 `type`。
-    #[error("type mismatch: expected {0}")]
-    Type(Value),
-    /// 小于 `minimum`。
-    #[error("value is less than minimum {0}")]
-    Minimum(f64),
-    /// 大于 `maximum`。
-    #[error("value exceeds maximum {0}")]
-    Maximum(f64),
-    /// 不大于 `exclusiveMinimum`。
-    #[error("value is not greater than exclusiveMinimum {0}")]
-    ExclusiveMinimum(f64),
-    /// 不小于 `exclusiveMaximum`。
-    #[error("value is not less than exclusiveMaximum {0}")]
-    ExclusiveMaximum(f64),
-    /// 不是 `multipleOf` 的整数倍。
-    #[error("value is not a multiple of {0}")]
-    MultipleOf(f64),
-    /// 字符数小于 `minLength`。
-    #[error("string is shorter than minLength {0}")]
-    MinLength(u64),
-    /// 字符数大于 `maxLength`。
-    #[error("string is longer than maxLength {0}")]
-    MaxLength(u64),
-    /// 元素数小于 `minItems`。
-    #[error("array has fewer items than minItems {0}")]
-    MinItems(u64),
-    /// 元素数大于 `maxItems`。
-    #[error("array has more items than maxItems {0}")]
-    MaxItems(u64),
-    /// 缺少 `required` 中的属性。
-    #[error("missing required property {0:?}")]
-    Required(String),
-    /// 不在 `enum` 中。
-    #[error("value is not in the allowed enum set")]
-    Enum,
-}
 
 /// 找出 JSON Pointer `path` 处数据对应的子 schema，对应 `GoSchemaValidator::SchemaForPath`。
 ///
@@ -85,66 +42,54 @@ pub fn schema_for_path<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
     })
 }
 
-/// 用一个 schema 节点校验 `value`，对应 `GoSchemaValidator::Validate`；返回空表即通过。
+/// 用一个 schema 节点校验 `value`，对应 `GoSchemaValidator::Validate`。每条问题是被违反的关键字与界限
+/// （`"maximum 10"`、`"type \"integer\""`、`"readOnly"`），空表即通过；C++ 的 `Errors()` 同样是字符串列表。
 ///
 /// 与 C++ 相同，只校验这一层（不递归进 `properties` / `items`），`readOnly` 与类型不符时立即返回，其余问题
-/// 全部收集。修正 C++ 的缺陷（重写方案 §5.4 第 37 条）：`binary` 要求 `Bin`（C++ 要求字符串）；`type` 可以是
+/// 全部收集。修正 C++ 的缺陷：`binary` 要求 `Bin`（C++ 要求字符串）；`type` 可以是
 /// 数组（可空类型，C++ 跳过类型检查）；`multipleOf` 对负数不误报；`enum` 中的整数精确比较（C++ 截断为 `int`）；
 /// 空 `enum` 不约束（C++ 拒绝一切值）；字符串长度按字符计（C++ 按字节）。
-pub fn validate(value: &Value, node: &Value) -> Vec<Issue> {
+pub fn validate(value: &Value, node: &Value) -> Vec<String> {
     if node["readOnly"].as_bool() == Some(true) {
-        return vec![Issue::ReadOnly];
+        return vec!["readOnly".to_owned()];
     }
     let mut types = type_names(node).peekable();
     if types.peek().is_some() && !types.any(|ty| type_matches(value, ty)) {
-        return vec![Issue::Type(node["type"].clone())];
+        return vec![format!("type {}", node["type"])];
     }
 
     let mut issues = Vec::new();
-    let number = |key: &str| node[key].as_f64();
-    let count = |key: &str| node[key].as_u64();
-
     if let Some(v) = value.as_f64() {
-        issues.extend(number("minimum").filter(|&l| v < l).map(Issue::Minimum));
-        issues.extend(number("maximum").filter(|&l| v > l).map(Issue::Maximum));
-        issues.extend(
-            number("exclusiveMinimum")
-                .filter(|&l| v <= l)
-                .map(Issue::ExclusiveMinimum),
-        );
-        issues.extend(
-            number("exclusiveMaximum")
-                .filter(|&l| v >= l)
-                .map(Issue::ExclusiveMaximum),
-        );
+        issues.extend(violated(node, "minimum", Value::as_f64, |l| v < l));
+        issues.extend(violated(node, "maximum", Value::as_f64, |l| v > l));
+        issues.extend(violated(node, "exclusiveMinimum", Value::as_f64, |l| {
+            v <= l
+        }));
+        issues.extend(violated(node, "exclusiveMaximum", Value::as_f64, |l| {
+            v >= l
+        }));
         // `%` 的余数与被除数同号；比较绝对值，负数在 −m 附近的余数不再误报。
-        let not_multiple = |d: f64| {
+        issues.extend(violated(node, "multipleOf", Value::as_f64, |d| {
             let rem = (v % d).abs();
             d.abs() > 0.0 && rem > EPSILON && d.abs() - rem > EPSILON
-        };
-        issues.extend(
-            number("multipleOf")
-                .filter(|&d| not_multiple(d))
-                .map(Issue::MultipleOf),
-        );
+        }));
     }
-
     match value {
         Value::Str(text) => {
             let n = text.chars().count() as u64;
-            issues.extend(count("minLength").filter(|&l| n < l).map(Issue::MinLength));
-            issues.extend(count("maxLength").filter(|&l| n > l).map(Issue::MaxLength));
+            issues.extend(violated(node, "minLength", Value::as_u64, |l| n < l));
+            issues.extend(violated(node, "maxLength", Value::as_u64, |l| n > l));
         }
         Value::Array(items) => {
             let n = items.len() as u64;
-            issues.extend(count("minItems").filter(|&l| n < l).map(Issue::MinItems));
-            issues.extend(count("maxItems").filter(|&l| n > l).map(Issue::MaxItems));
+            issues.extend(violated(node, "minItems", Value::as_u64, |l| n < l));
+            issues.extend(violated(node, "maxItems", Value::as_u64, |l| n > l));
         }
         Value::Map(map) => {
             let required = node["required"].as_array().unwrap_or_default();
             for name in required.iter().filter_map(Value::as_str) {
                 if !map.contains_key(name) {
-                    issues.push(Issue::Required(name.to_owned()));
+                    issues.push(format!("required {name:?}"));
                 }
             }
         }
@@ -154,9 +99,21 @@ pub fn validate(value: &Value, node: &Value) -> Vec<Issue> {
     let options = node["enum"].as_array().unwrap_or_default();
     let scalar = !matches!(value, Value::Nil | Value::Array(_) | Value::Map(_));
     if scalar && !options.is_empty() && !options.iter().any(|option| enum_eq(value, option)) {
-        issues.push(Issue::Enum);
+        issues.push("enum".to_owned());
     }
     issues
+}
+
+/// schema 节点中 `keyword` 的界限（经 `limit` 读出）被 `broken` 判为违反时，返回“关键字 界限”。
+fn violated<T: Copy + fmt::Display>(
+    node: &Value,
+    keyword: &str,
+    limit: fn(&Value) -> Option<T>,
+    broken: impl Fn(T) -> bool,
+) -> Option<String> {
+    limit(&node[keyword])
+        .filter(|&l| broken(l))
+        .map(|l| format!("{keyword} {l}"))
 }
 
 /// `type` 中的类型名：字符串，或字符串数组（可空类型）。
@@ -198,5 +155,54 @@ fn enum_eq(value: &Value, option: &Value) -> bool {
             .zip(option.as_f64())
             .is_some_and(|(a, b)| (a - b).abs() < EPSILON),
         _ => value == option,
+    }
+}
+
+// 校验与导航是刻意不同于 C++ 的自有算法，无法与官方实现对照。
+#[cfg(test)]
+mod tests {
+    use super::{schema_for_path, validate};
+    use crate::value::Value;
+
+    // 约定：binary 要求 Bin；type 数组表示可空；multipleOf 对负数不误报；enum 中的整数精确比较；空 enum 不约束；
+    // 长度按字符计。schema_for_path：路径与 Value::pointer 同一语法（"/" 是键 ""），可空数组同样按 items 导航。
+    #[test]
+    fn validation_follows_own_conventions() {
+        let json = |text: &str| text.parse::<Value>().unwrap();
+        let nullable = r#"{"type":["number","null"],"minimum":0}"#;
+        let cases = [
+            (Value::from(vec![1_u8]), r#"{"type":"binary"}"#, vec![]),
+            (
+                json(r#""AQ==""#),
+                r#"{"type":"binary"}"#,
+                vec!["type \"binary\""],
+            ),
+            (Value::Nil, nullable, vec![]),
+            (json("-1"), nullable, vec!["minimum 0"]),
+            (json("-4"), r#"{"multipleOf":2}"#, vec![]),
+            (json("-3.0"), r#"{"multipleOf":2}"#, vec!["multipleOf 2"]),
+            (json("4294967297"), r#"{"enum":[1]}"#, vec!["enum"]),
+            (json(r#""x""#), r#"{"enum":[]}"#, vec![]),
+            (json(r#""毫米""#), r#"{"maxLength":2}"#, vec![]),
+        ];
+        for (value, schema, expected) in cases {
+            assert_eq!(
+                validate(&value, &json(schema)),
+                expected,
+                "{schema} {value}"
+            );
+        }
+
+        let schema = json(
+            r#"{"properties":{"":{"type":"integer"},"l":{"type":["array","null"],"items":{"type":"number"}}}}"#,
+        );
+        assert_eq!(
+            schema_for_path(&schema, "/"),
+            schema.pointer("/properties/")
+        );
+        assert_eq!(
+            schema_for_path(&schema, "/l/3"),
+            schema.pointer("/properties/l/items")
+        );
     }
 }

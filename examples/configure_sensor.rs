@@ -15,8 +15,8 @@ use common::{
     SCANNER_PATH, SENSOR_PATH, SINGLE_EXPOSURE_PATH, TRIGGER_MODE_SOFTWARE, TRIGGER_SOURCE_PATH,
     section, trigger_event_name,
 };
+use gopxl::Value;
 use gopxl::control::Handle;
-use gopxl::value::Value;
 
 const DIGITAL_OUTPUT_PORT_PATH: &str = "/controls/digitalOutput/devices/device-0/ports/port-0";
 
@@ -45,7 +45,7 @@ fn main() -> common::Result {
     payload.set(SINGLE_EXPOSURE_PATH, 1200)?;
     println!("Setting single exposure to 1200...");
     client.update(SENSOR_PATH, payload).response()?;
-    let exposure = read_at(client, SENSOR_PATH, SINGLE_EXPOSURE_PATH)?;
+    let exposure = common::read_at(client, SENSOR_PATH, SINGLE_EXPOSURE_PATH)?;
     println!("Exposure value: {exposure}");
 
     section("Configuration 3: Update multiple exposures.");
@@ -57,14 +57,14 @@ fn main() -> common::Result {
     )?;
     println!("Setting multiple exposures...");
     client.update(SENSOR_PATH, payload).response()?;
-    let exposures = read_at(client, SENSOR_PATH, MULTI_EXPOSURE_PATH)?;
+    let exposures = common::read_at(client, SENSOR_PATH, MULTI_EXPOSURE_PATH)?;
     println!("Multi-exposure values: {exposures}");
 
     section("Configuration 4: Update sensor name.");
     println!("Setting display name...");
     let payload = r#"{"displayName":"Main-Sensor-Change"}"#.parse::<Value>()?;
     client.update(SENSOR_PATH, payload).response()?;
-    let name = read_at(client, SENSOR_PATH, "/displayName")?;
+    let name = common::read_at(client, SENSOR_PATH, "/displayName")?;
     println!("Display name: {name}");
 
     section("Configuration 5: Change the active area.");
@@ -73,14 +73,14 @@ fn main() -> common::Result {
     payload.set(&format!("{ACTIVE_AREA_PATH}/width"), 3.5)?;
     println!("Updating active area...");
     client.update(SENSOR_PATH, payload).response()?;
-    let area = read_at(client, SENSOR_PATH, ACTIVE_AREA_PATH)?;
+    let area = common::read_at(client, SENSOR_PATH, ACTIVE_AREA_PATH)?;
     println!("Active area: {area}");
 
     section("Configuration 6: Enable, trigger, and configure Digital Output.");
     configure_digital_output(client)?;
 
     section("Configuration 7: Update network configuration.");
-    let interfaces = read_at(client, common::IP_CONFIG_PATH, "/interfaces")?;
+    let interfaces = common::read_at(client, common::IP_CONFIG_PATH, "/interfaces")?;
     println!("Network configurations: {interfaces}.");
     // 改 IP：把读到的载荷中 /interfaces/0/ipAddress 改为新地址后 update IP_CONFIG_PATH，之后用新地址连接。
     Ok(())
@@ -112,7 +112,7 @@ fn configure_digital_output(client: &Handle) -> common::Result {
     client
         .update(DIGITAL_OUTPUT_PORT_PATH, payload)
         .response()?;
-    let event = read_at(client, DIGITAL_OUTPUT_PORT_PATH, DIO_TRIGGER_EVENT_PATH)?;
+    let event = common::read_at(client, DIGITAL_OUTPUT_PORT_PATH, DIO_TRIGGER_EVENT_PATH)?;
     let name = event
         .as_i64()
         .and_then(trigger_event_name)
@@ -135,15 +135,6 @@ fn configure_digital_output(client: &Handle) -> common::Result {
     let payload = r#"{"parameter":{"target":0}}"#.parse::<Value>()?;
     report(client.call(&trigger_path, payload).response());
     Ok(())
-}
-
-/// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错（C++ 的 `At` 抛异常）。
-fn read_at(client: &Handle, path: &str, pointer: &str) -> common::Result<Value> {
-    let payload = client.read(path).response()?.payload;
-    let value = payload
-        .pointer(pointer)
-        .ok_or_else(|| format!("{path} has no {pointer}"))?;
-    Ok(value.clone())
 }
 
 /// 打印失败步骤的错误，不中止示例。

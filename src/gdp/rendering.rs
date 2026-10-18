@@ -5,7 +5,7 @@ use bytes::{Buf, Bytes};
 use super::{GdpError, array, optional, read_bool, read_items, read_vec, section, text, triple};
 
 /// 叠加图形（类型 70，`GoGdpRendering` / `GoGraphics`）。各计数按 `u16` 读取（C++ 用 `k16s`，≥ 32768 时跳过循环
-/// 并错位，重写方案 §5.4 第 26 条）。
+/// 并错位）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rendering {
     /// 点集。
@@ -98,7 +98,7 @@ pub enum Region {
         /// 绕 Z 轴的角度。
         angle_z: f64,
     },
-    /// 未知的区域类型，段被整体跳过（C++ 不消耗段而错位，.NET 抛异常，重写方案 §5.4 第 26 条）。
+    /// 未知的区域类型，段被整体跳过（C++ 不消耗段而错位，.NET 抛异常）。
     Unknown(u8),
 }
 

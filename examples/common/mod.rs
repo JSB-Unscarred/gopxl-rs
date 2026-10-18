@@ -8,9 +8,10 @@
 #![allow(dead_code, reason = "每个示例只用到其中一部分")]
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gopxl::control::Handle;
+use gopxl::control::{Handle, Method, Request};
 use gopxl::discovery::{self, Instance};
 use gopxl::gdp::{Body, Cas, GdpClient, Image, Message, PixelFormat, ProfileAttrs};
 use gopxl::{RunState, System, Value, control};
@@ -190,29 +191,51 @@ pub fn trigger_event_name(event: i64) -> Option<&'static str> {
     })
 }
 
+/// 扫描器的数据源 `scan:<引擎>:<扫描器>:<key>`，例如 `topUniformProfile`、`stamp`；共焦引擎的轮廓带 `Layer0`
+/// 后缀，`LMIFringeSnapshot` 以传感器 ID 代替 `top`。
+pub fn scan_source(key: &str) -> String {
+    format!("scan:{ENGINE_ID}:{SCANNER_ID}:{key}")
+}
+
+/// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错（C++ 的 `At` 抛异常）。
+pub fn read_at(client: &Handle, path: &str, pointer: &str) -> Result<Value> {
+    let payload = client.read(path).response()?.payload;
+    let value = payload
+        .pointer(pointer)
+        .ok_or_else(|| format!("{path} has no {pointer}"))?;
+    Ok(value.clone())
+}
+
 /// 读 `/replay/playback`，打印并返回用的是否是回放数据。
 pub fn replay_enabled(client: &Handle) -> Result<bool> {
-    let replay = client.read("/replay/playback").response()?.payload;
-    let enabled = replay["enabled"]
+    let enabled = read_at(client, "/replay/playback", "/enabled")?
         .as_bool()
-        .ok_or("/replay/playback has no \"enabled\"")?;
+        .ok_or("/replay/playback enabled is not a boolean")?;
     println!("Using {} data", if enabled { "replay" } else { "live" });
     Ok(enabled)
 }
 
 /// 扫描模式不是 `mode` 时改为 `mode`（`name` 用于打印）。
 pub fn set_scan_mode(client: &Handle, mode: i64, name: &str) -> Result {
-    let scanner = client.read(SCANNER_PATH).response()?.payload;
-    let current = scanner
-        .pointer(SCAN_MODE_PATH)
-        .and_then(Value::as_i64)
-        .ok_or("the scanner has no scan mode")?;
+    let current = read_at(client, SCANNER_PATH, SCAN_MODE_PATH)?
+        .as_i64()
+        .ok_or("the scan mode is not an integer")?;
     if current != mode {
         println!("Setting scan mode to {name}...");
         let mut patch = Value::object();
         patch.set(SCAN_MODE_PATH, mode)?;
         client.update(SCANNER_PATH, patch).response()?;
     }
+    Ok(())
+}
+
+/// 开启扫描器的强度输出。
+pub fn enable_intensity(client: &Handle) -> Result {
+    println!("Enabling intensity...");
+    let intensity = r#"{"parameters":{"scanModeSettings":{"intensityEnabled":true}}}"#;
+    client
+        .update(SCANNER_PATH, intensity.parse::<Value>()?)
+        .response()?;
     Ok(())
 }
 
@@ -264,8 +287,42 @@ pub fn ensure_output(client: &Handle, source: &str) -> Result {
 /// 连接同一主机上的 GDP 服务端，端口来自 [`System::gdp_port`]；对应 C++ 示例的
 /// `gdpClient->Connect(system.Address(), system.GdpPort())`。
 pub fn connect_gdp(system: &System) -> Result<GdpClient> {
+    println!("Connecting to Gocator Protocol...");
     let addr = SocketAddr::new(system.client().addr().ip(), system.gdp_port()?);
     Ok(GdpClient::connect(addr)?)
+}
+
+/// 用 `call <command>` 下载归档（`contents` 选内容），写到当前目录的 `file`，返回其绝对路径；对应 C++ 示例的
+/// archive 一段。响应可能超过 1 GiB，返回前释放。
+pub fn download_archive(client: &Handle, contents: &Value, file: &str) -> Result<PathBuf> {
+    let archive = Request::with_payload(Method::Call, "/system/commands/archive", contents.clone());
+    let response = client.transfer(archive, RECEIVE_TIMEOUT)?;
+    let data = response.payload["data"]
+        .as_bytes()
+        .ok_or("archive response has no binary \"data\"")?;
+    println!("Downloading {file}...");
+    let path = std::path::absolute(file)?;
+    std::fs::write(&path, data)?;
+    println!("File location: {}", path.display());
+    Ok(path)
+}
+
+/// 把归档文件 `path` 作为 `data` 连同 `contents` 上传并恢复（`call /system/commands/restore`）；对应 C++ 示例的
+/// restore 一段。
+pub fn restore_archive(client: &Handle, contents: Value, path: &Path) -> Result {
+    let mut restore = Request::with_payload(Method::Call, "/system/commands/restore", contents);
+    restore.payload.set("data", std::fs::read(path)?)?;
+    println!("Restoring from {}...", path.display());
+    client.transfer(restore, EXTENDED_TIMEOUT)?;
+    Ok(())
+}
+
+/// 打印标题与各资源路径（C++ 遍历 `ChildUris` 的循环）。
+pub fn print_paths(title: &str, paths: &[String]) {
+    println!("\n{title}:");
+    for path in paths {
+        println!("  {path}");
+    }
 }
 
 /// 打印消息类型与公共属性（C++ 各消息分支开头的几行）；数组输出的每一层是一条消息，以 `array_index` 区分。
@@ -290,6 +347,46 @@ pub fn profile_mm(attrs: &ProfileAttrs, [x, z]: [f64; 2]) -> [f64; 2] {
         attrs.x_offset + attrs.x_scale * x,
         attrs.z_offset + attrs.z_scale * z,
     ]
+}
+
+/// 消息是轮廓时把它换算为毫米坐标并打印点数，返回是否为轮廓；对应 C++ 循环里轮廓的两个分支。
+pub fn print_profile(message: &Message) -> bool {
+    let (kind, total, intensity, points): (_, _, _, Vec<[f64; 2]>) = match &message.body {
+        Body::UniformProfile(profile) => {
+            // 统一轮廓只发送 z，x 由点的下标换算。
+            let points = (0u32..)
+                .zip(&profile.ranges)
+                .filter(|&(_, &z)| z != NULL)
+                .map(|(x, &z)| profile_mm(&profile.attrs, [x.into(), z.into()]))
+                .collect();
+            (
+                "Uniform Profile",
+                profile.ranges.len(),
+                &profile.intensity,
+                points,
+            )
+        }
+        Body::ProfilePointCloud(profile) => {
+            let points = profile
+                .points
+                .iter()
+                .filter(|&&[x, _]| x != NULL)
+                .map(|point| profile_mm(&profile.attrs, point.map(f64::from)))
+                .collect();
+            (
+                "Point Cloud Profile",
+                profile.points.len(),
+                &profile.intensity,
+                points,
+            )
+        }
+        _ => return false,
+    };
+    print_cas(kind, &message.cas);
+    println!("Profile points count: {total}");
+    println!("Intensity count: {}", intensity.len());
+    println!("Valid points count: {}", points.len());
+    true
 }
 
 /// 反复接收，直到数据集里有图像或超过 10 s；返回最后一个数据集（C++ 的 `DataSet()`）。

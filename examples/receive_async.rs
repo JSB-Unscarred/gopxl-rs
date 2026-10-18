@@ -27,7 +27,7 @@ async fn main() -> common::Result {
 
     let mut gdp = common::connect_gdp(&system).await?;
 
-    println!("Running callback function to receive data...");
+    println!("Receiving data...");
     println!("Press Enter to close the connection and exit.");
     common::start_if_ready(&system).await?;
 

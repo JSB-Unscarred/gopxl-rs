@@ -16,7 +16,8 @@ use crate::value::Value;
 /// `GoSystem` 各操作的超时（C++ 的 `*_TIMEOUT_MSEC` 都是 15 s）。
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 一台 GoPxL 设备，对应 C++ 的 `GoSystem`。存在即已连接，没有“未连接”的状态。
+/// 一台 GoPxL 设备，对应 `GoSystem`。构造即连接；连接断开后 `System` 仍在，`client().is_connected()` 为假，
+/// 之后的请求以 `Disconnected` 失败。
 ///
 /// 唯一拥有主连接（[`Connection`]），Drop 即断开（C++ 的 `Disconnect`）。地址、连接状态与原始动词经
 /// [`client`](Self::client) 访问。

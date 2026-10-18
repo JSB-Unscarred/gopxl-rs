@@ -94,12 +94,12 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
 
 /// 读任务与句柄共享的连接状态。
 ///
-/// 句柄 Drop 时 [`close`](Self::close)：记下原因、shutdown（对端立即收到 FIN，不等别的句柄释放写半边）并中止读任务，
-/// 读任务里的半个 socket 随之释放，所以 Drop 从不阻塞、不留线程（C++ 先 join 后 shutdown，读线程卡在半帧中时永远
-/// 挂住）。读任务自己结束时用 [`finish`](Self::finish) 记下原因，句柄之后的调用都报这个原因。
+/// 持有连接的句柄（`Connection`、`StreamHandle`、`gdp::Client`）Drop 时 [`close`](Self::close)：记下原因、shutdown
+/// （对端立即收到 FIN，不等别处释放写半边）并中止读任务，读任务里的半个 socket 随之释放，所以 Drop 从不阻塞、不留
+/// 任务，读任务卡在半帧中时也一样。读任务自己结束时用 [`finish`](Self::finish) 记下原因，句柄之后的调用都报这个原因。
 #[derive(Debug)]
 pub(crate) struct Link {
-    /// 同一个 socket 的另一个句柄，只用来 shutdown：tokio 的读写两半分别在读任务与写锁里，这里不碰它们。
+    /// 同一个 socket 的另一个句柄，只用来 shutdown：tokio 的读写两半由读任务与连接的其他部分持有，这里不碰它们。
     socket: std::net::TcpStream,
     reason: OnceLock<Arc<DisconnectReason>>,
     reader: OnceLock<AbortHandle>,
@@ -119,7 +119,7 @@ impl Link {
         let _ = self.reader.set(reader);
     }
 
-    /// 记下断开原因、shutdown 并中止读任务；只有第一次调用生效，并返回记下的原因。
+    /// 记下断开原因、shutdown 并中止读任务；只有第一次调用生效并返回记下的原因，之后的调用返回 `None`。
     pub(crate) fn finish(&self, reason: DisconnectReason) -> Option<&Arc<DisconnectReason>> {
         self.reason.set(Arc::new(reason)).ok()?;
         let _ = self.socket.shutdown(Shutdown::Both);
@@ -129,7 +129,7 @@ impl Link {
         self.reason.get()
     }
 
-    /// owner Drop 时以 `Closed` 断开。
+    /// 持有连接的句柄 Drop 时以 `Closed` 断开。
     pub(crate) fn close(&self) {
         self.finish(DisconnectReason::Closed);
     }

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// 状态码，对应 `kStatus`（`k32s`）。1 表示成功，0 与负数表示失败；服务端可能返回表外的负数，同样是失败。
+/// 状态码，对应 `kStatus`（`i32`）。1 表示成功，其他值都表示失败；表外的值原样保留。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Status(pub i32);
 

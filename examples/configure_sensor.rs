@@ -81,7 +81,7 @@ async fn main() -> common::Result {
     section("Configuration 6: Enable, trigger, and configure Digital Output.");
     configure_digital_output(client).await?;
 
-    section("Configuration 7: Update network configuration.");
+    section("Configuration 7: Read network configuration.");
     let interfaces = common::read_at(client, common::IP_CONFIG_PATH, "/interfaces").await?;
     println!("Network configurations: {interfaces}.");
     // 改 IP：把读到的载荷中 /interfaces/0/ipAddress 改为新地址后 update IP_CONFIG_PATH，之后用新地址连接。

@@ -56,7 +56,7 @@ pub(super) struct SubQueue {
     ready: Notify,
 }
 
-/// [`SubQueue::pop`] 取到的项；`None` 表示队列为空。
+/// [`SubQueue::pop`] 取到的项；`pop` 返回 `None` 表示队列为空。
 enum Pop {
     Notice(Notice),
     Closed,

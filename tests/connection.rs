@@ -201,20 +201,21 @@ async fn server_close_fails_every_pending_request_with_one_reason() {
     server.finish();
 }
 
-// Drop 从不阻塞：读任务卡在半帧里时，Connection 的 Drop 记下原因、shutdown 并中止读任务，立即返回（C++ 先 join
-// 后关闭 socket，此时永远挂住）。挂起的请求以 Closed 失败；Client 不让连接存活，之后经它发出的请求立即失败。
+// Drop 从不阻塞：读任务卡在半帧里时，Connection 的 Drop 记下原因、shutdown 并中止读任务，立即返回。挂起的请求以
+// Closed 失败；Client 不让连接存活，之后经它发出的请求立即失败。
 #[tokio::test]
 async fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
     let (half_sent, mut half_received) = mpsc::channel(1);
-    let (dropped, mut dropped_received) = mpsc::channel::<()>(1);
+    let (dropped, dropped_received) = std::sync::mpsc::channel::<()>();
     let server = Server::start(move |listener| {
         let mut conn = accept(listener);
         // 只写出长度字段：声明一帧 100 字节，剩下的永远不来。
         conn.write_all(&100_u32.to_le_bytes()).unwrap();
         expect_request(&mut conn, "read", "/x");
         half_sent.blocking_send(()).unwrap();
-        // 测试确认 Drop 已返回后才关闭；超过 STEP 也关闭，让一个会等读任务的 Drop 结束、由测试里的计时报错。
-        let _ = dropped_received.blocking_recv();
+        // 测试确认 Drop 已返回后才关闭；超过 STEP 也继续往下走，让一个会等读任务的 Drop 结束、由测试里的计时报错，
+        // 而不是让测试卡住。
+        let _ = dropped_received.recv_timeout(STEP);
         wait_for_close(&mut conn);
     });
     let connection = Connection::connect(server.addr).await.unwrap();
@@ -228,7 +229,7 @@ async fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
     let start = Instant::now();
     drop(connection);
     assert!(start.elapsed() < Duration::from_secs(1));
-    dropped.send(()).await.unwrap();
+    dropped.send(()).unwrap();
 
     let Err(Error::Disconnected(reason)) = pending.await.unwrap() else {
         panic!("expected Disconnected")

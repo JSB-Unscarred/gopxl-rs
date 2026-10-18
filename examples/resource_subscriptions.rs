@@ -59,7 +59,7 @@ async fn main() -> common::Result {
     system_res.unsubscribe().await?;
     println!("IsSubscribed: {}", system_res.is_subscribed());
 
-    println!("\n=== Subscribe on Creation ===");
+    println!("\n=== Subscribe after Creation ===");
     let mut sensor = system.resource(SENSOR_PATH);
     sensor.subscribe().await?;
     sensor.data().await?;

@@ -59,7 +59,7 @@ pub struct FrameReader {
 }
 
 impl FrameReader {
-    /// `min` 是协议的帧头长度（不足即坏帧），`max` 是连接愿意为一帧分配的上限。
+    /// `min` 是协议的帧头长度（不足即坏帧，小于 4 时取 4，即长度字段本身），`max` 是连接愿意为一帧分配的上限。
     pub fn new(min: u32, max: u32) -> Self {
         Self {
             min: min.max(4),

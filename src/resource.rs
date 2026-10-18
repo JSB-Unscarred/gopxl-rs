@@ -57,8 +57,8 @@ pub struct Resource {
 }
 
 impl Resource {
-    /// 路径 `path` 上的资源，不发请求，对应 C++ 的 `GoResource(client, uri)`：超时 5 s、展开层级 0、不校验。
-    /// 路径原样发送；订阅要求规范路径（以 `/` 开头、没有空段），见 [`subscribe`](Self::subscribe)。
+    /// 路径 `path` 上的资源，不发请求，对应 `GoResource(client, uri)`：超时 5 s、展开层级 0、不校验。
+    /// 路径原样发送；不以 `/` 开头或含空段的路径订阅后收不到通知，见 [`subscribe`](Self::subscribe)。
     pub fn new(client: Client, path: impl Into<String>) -> Self {
         Self {
             client,

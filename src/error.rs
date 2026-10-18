@@ -19,7 +19,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DisconnectReason {
-    /// 本端关闭了连接（owner 被 drop）。
+    /// 本端关闭了连接（`Connection`、`StreamHandle` 或 `gdp::Client` 被 drop）。
     #[error("closed by the client")]
     Closed,
     /// 服务端在帧边界上关闭了连接。
@@ -49,7 +49,8 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    /// 请求已写出，期限内没有应答。主连接上的槽位成为墓碑，迟到的应答被它吸收，连接照常可用。
+    /// 请求已写出，期限内没有应答；文件传输的期限是连续收不到数据的时长。主连接上迟到的应答会被丢弃，连接照常
+    /// 可用。
     #[error("{} {path}: no response within {after:?}", method.as_str())]
     Timeout {
         /// 请求的方法。
@@ -87,7 +88,7 @@ pub enum Error {
         /// 被违反的关键字与界限（见 [`schema::validate`](crate::schema::validate)），非空。
         issues: Vec<String>,
     },
-    /// 参数无法发送：端口为 0、帧超过 4 GiB、主连接上的 `stream` / `cancelStream`、无法匹配的订阅表达式。
+    /// 参数无法发送：端口为 0、帧超过 4 GiB、主连接上的 `stream` / `cancelStream`、含正则元字符或 NUL 的订阅表达式。
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 }

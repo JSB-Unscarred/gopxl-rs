@@ -3,7 +3,8 @@
 //!
 //! 每个示例以 `mod common;` 引入；设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），未设置时先发现
 //! （C++ 示例写死 `SYSTEM_IP` 为 `192.168.1.10`）。被远程控制（加速）的传感器要连接控制方，通常是 `127.0.0.1`。
-//! 换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 与路径，示例的其他路径与数据源都由它们拼出。
+//! 换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 常量与写死了引擎 ID 的各个路径常量，示例的其他
+//! 路径与数据源都由这些常量拼出。
 
 #![allow(dead_code, reason = "每个示例只用到其中一部分")]
 
@@ -402,7 +403,8 @@ pub fn print_profile(message: &Message) -> bool {
     true
 }
 
-/// 反复接收，直到数据集里有图像或超过 10 s；返回最后一个数据集（C++ 的 `DataSet()`）。
+/// 反复接收，直到数据集里有图像或开始等待已超过 10 s（单次接收最长 [`RECEIVE_TIMEOUT`]，所以总时长可能更长）；
+/// 返回最后一个数据集。
 pub async fn wait_for_image(gdp: &mut gdp::Client) -> Result<Vec<Message>> {
     println!("Waiting until a dataset with Image data is received within 10 seconds.");
     let deadline = Instant::now() + Duration::from_secs(10);

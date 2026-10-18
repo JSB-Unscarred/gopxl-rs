@@ -86,7 +86,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Client::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(&mut self, Duration) -> Result<Option<StreamMessage>>`、`recv()`、`try_recv()`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
 | `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | 不提供 | 拆连接后 `is_connected` 为假，之后每个请求、订阅与流都返回 `Disconnected(原因)`；只在真正拆连接时（C++ 不给原因，一个坏消息就触发） |
 | — | `Client::transfer(Request, Duration) -> Result<Response>` | 文件传输（归档、恢复、升级、作业与回放数据）用的临时连接，不阻塞主连接；超时是连续没有收到字节的时长；下载的 `Bin` 引用响应帧 |
-| `GoSystem::GoSystem(address, port)`、`SetAddress`、`SetControlPort`、`Connect` | `System::connect(SocketAddr) -> Result<System>` | 存在即已连接，没有“未连接”的状态；端口 0 报 `InvalidArgument` |
+| `GoSystem::GoSystem(address, port)`、`SetAddress`、`SetControlPort`、`Connect` | `System::connect(SocketAddr) -> Result<System>` | 构造即连接，断开后请求以 `Disconnected` 失败；端口 0 报 `InvalidArgument` |
 | `GoSystem::Disconnect`、`~GoSystem`（.NET 的 `Dispose`） | `drop(system)` | 同 `GoRestClient::Disconnect` |
 | `GoSystem::Client` | `System::client() -> &Client` | `IsConnected` 经它调用 `is_connected` |
 | `GoSystem::Address`、`ControlPort` | `Client::addr() -> SocketAddr` |  |
@@ -178,7 +178,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoJsonIterator` | `as_array()` / `as_map()` 返回的切片与 `BTreeMap` 的迭代器 |  |
 | `GoJsonError` | `PointerError`、`value::msgpack::DecodeError`、`value::msgpack::EncodeError`、`serde_json::Error`、`serde::de::value::Error`（`T::deserialize(&value)`） | 读取返回 `Option`，不报错 |
 | 控制通道消息体（carrier 类型 0xB000，MessagePack） | `value::msgpack` | 编码与 nlohmann 3.8.0 逐字节一致（最短整数、float64、键按字节序）；解码不依赖整数宽度与键序，ext 当作 `Bin` |
-| 长度前缀帧：carrier 帧、GDP 消息 | `frame::FrameReader`、`frame::FrameError`；`control::HEADER_LEN`（14）、`gdp::HEADER_LEN`（6） | 小端 `u32` 长度包含自身；先校验长度再精确分配；`WouldBlock` 不丢失已读字节 |
+| 长度前缀帧：carrier 帧、GDP 消息 | `frame::FrameReader`、`frame::FrameError`；`control::HEADER_LEN`（14）、`gdp::HEADER_LEN`（6） | 小端 `u32` 长度包含自身；先校验长度再分配，大于 8 KiB 的帧按长度精确分配 |
 | carrier 帧（`GoCtrlChannelV1`） | `Request::encode`、`Inbound::decode` | 客户端只收发 0xB000：服务端按请求的格式回复，C++ SDK 也只收 0xB000；与 C++ 一样不检查 `CarrierStatus` |
 | `GoRequestMethod::Method` | `control::Method` |  |
 | `GoResponseType` | `control::Inbound`：`Response`、`Notification`、`Stream`、`Other` |  |

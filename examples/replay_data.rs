@@ -1,10 +1,8 @@
-//! 录制扫描数据并下载为 `.gprec` 文件，再上传、回放并跳到最后一帧，对应 C++ 示例 `ReplayData`。
+//! 录制扫描数据并下载为 `.gprec` 文件，再上传、回放并跳到最后一帧。
 //!
 //! 会修改设备：开启录制，把扫描器改为 10 Hz 时间触发，运行 0.5 s 后停止；用只含当前作业与回放数据的归档把录制下载到
-//! `sample_recording.gprec`，再恢复它并开启回放。
-//!
-//! 与 C++ 的差异：录制的下载与上传（归档、恢复）走文件传输连接（`Client::transfer`）；只移植 `GOCATOR_SENSOR`
-//! 分支（触发参数在扫描器上；SmartCam 的在传感器上）。
+//! 当前目录的 `sample_recording.gprec`，再恢复它并开启回放（收发方式见 `common::download_archive`）。只适用于
+//! Gocator 传感器，SmartCam 的触发参数路径不同。
 
 mod common;
 

@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, array, read_bool, read_items, read_vec, section, take, triple};
 
-/// 网格（类型 18，`GoGdpMesh`）。
+/// 网格（类型 18）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     /// 是否有数据。
@@ -19,28 +19,28 @@ pub struct Mesh {
     pub offset: [f64; 3],
     /// 范围 x、y、z。
     pub range: [f64; 3],
-    /// 通道，按线上顺序（C++ 的 `ChannelX(i)` 按此下标而非通道 ID）；C++ 的 `ChannelCount` 即 `channels.len()`。
+    /// 通道，按线上顺序；下标不等于通道 ID。
     pub channels: Vec<MeshChannel>,
 }
 
-/// 网格的一个通道（C++ `MeshMsgChannel`）。
+/// 网格的一个通道。
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshChannel {
     /// 通道 ID：0 顶点、1 面、2 面法向、3 顶点法向、4 顶点纹理、5 顶点曲率，≥ 6 为用户通道。
     pub id: u32,
-    /// 通道类型（`Channel_Type`：0 无效、1 顶点 … 6 顶点曲率），原样保留。
+    /// 通道类型（0 无效、1 顶点 … 6 顶点曲率），原样保留。
     pub ty: u32,
-    /// 通道状态，原样保留（SDK 为 0 Error … 5 Full，手册为 −1..4）。
+    /// 通道状态，原样保留；取值的编号尚未确定（0 Error … 5 Full，或手册中的 −1..4）。
     pub state: i32,
     /// 标志。
     pub flag: u32,
     /// 已使用的元素数。
     pub used: u32,
-    /// 通道数据：已分配的 allocateCount 个元素（不是 `used` 个），C++ 的 `AllocatedChannelDataCount` 即其长度。
+    /// 通道数据：已分配的 allocateCount 个元素（不是 `used` 个）。
     pub data: MeshData,
 }
 
-/// 通道数据，元素类型由通道 ID 决定（与 C++ 相同，不看通道类型）。
+/// 通道数据，元素类型由通道 ID 决定，不看通道类型。
 #[derive(Clone, Debug, PartialEq)]
 pub enum MeshData {
     /// ID 0、2、3：`f32` 的 x、y、z。
@@ -75,8 +75,8 @@ impl Mesh {
 }
 
 impl MeshChannel {
-    /// 读取通道段与段外的 allocateCount 个元素。C++ 不检查剩余字节，巨大的 allocateCount 会逐个 `make_shared`
-    /// 直到读失败；这里由 `read_vec` / `take` 先确认字节够。
+    /// 读取通道段与段外的 allocateCount 个元素。`read_vec` / `take` 先确认字节够再分配，巨大的 allocateCount
+    /// 只得到 `Truncated`。
     fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let id = s.try_get_u32_le()?;
@@ -117,7 +117,7 @@ mod tests {
             .collect()
     }
 
-    /// F18（derived）：顶点通道（allocateCount 2、usedCount 1）与 3 字节的用户通道。
+    /// 手工构造的网格消息：顶点通道（allocateCount 2、usedCount 1）与 3 字节的用户通道。
     const F18: &str = "B6 00 00 00 12 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 FF FF FF FF FF FF FF FF 01 FF FF \
         43 00 01 06 00 00 00 05 00 00 00 01 00 00 00 02 00 00 00 \
         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
@@ -127,8 +127,7 @@ mod tests {
         1A 00 06 00 00 00 00 00 00 00 05 00 00 00 34 12 00 00 03 00 00 00 03 00 00 00 AA BB CC";
 
     // 内存安全约定：声明巨大 allocateCount 的通道在分配之前报 Truncated，CAS 仍然有效。检查的是所有 GDP 数组共用的
-    // `read_vec` / `take`：先确认字节够再分配。
-    // lint 只禁止 panic，拦不住按网络输入分配巨量内存。
+    // `read_vec` / `take`：先确认字节够再分配。lint 只禁止 panic，拦不住按网络输入分配巨量内存。
     #[test]
     fn huge_allocate_count_is_truncated() {
         let mut bytes = hex(F18);

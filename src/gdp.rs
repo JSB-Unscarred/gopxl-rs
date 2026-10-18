@@ -1,21 +1,21 @@
 //! GDP 数据通道的消息解码：服务端经 TCP（默认 3601）单向推送测量数据，控制通道 `/dataSources` 流的 bin 也是同样的消息。
 //!
-//! 消息全部小端、紧密排列：`[u32 size][u16 type][CAS][类型相关部分]`，`size` 包含自身。CAS 与各类型的属性段是“段”：
-//! 开头是包含自身的长度字段（CAS 为 `u32`，属性段与 Rendering 条目为 `u16`）。属性段之后的数据数组不在任何段内，
-//! 长度来自属性里的计数。
+//! 消息全部小端、紧密排列：`[u32 size][u16 type][CAS][类型相关部分]`，`size` 包含自身。CAS（Common Attribute
+//! Section）是每条 GDP 消息的公共属性段。CAS、各类型的属性段与 Rendering 图元都是“段”：开头是包含自身的长度字段
+//! （CAS 为 `u32`，其余为 `u16`）。属性段之后的数据数组不在任何段内，长度来自属性里的计数。字段文档中“1.3 新增”
+//! 之类的版本号指引入该字段的 GoPxL 版本。
 //!
 //! 输入来自网络，以下约定保证坏消息只会得到 `Err` 或 [`Body::Invalid`]：
 //! - 段内读取以段尾为界，读完已知字段后跳到段尾：新版本服务端追加的字段被忽略（向前兼容），字段不全的段也读不到
-//!   下一段的数据（C++ 越界读取，到 `EndRead` 才发现）；段长小于长度字段自身或超出外层段时报错；
+//!   下一段的数据；段长小于长度字段自身或超出外层段时报错；
 //! - 可选的尾部字段（gdpId、图像的 scale / offset、表面强度格式、标签对齐与颜色、测量与字符串的标签位置）只在
-//!   段内剩余字节够整组时读取（图像 1.3 字段与测量 / 字符串的标签位置，C++ 剩 1 字节就读，会越过段尾；gdpId 则
-//!   C++ 总是读取）；
+//!   段内剩余字节够整组时读取，否则视为缺失：旧版本服务端的短段也不会被读过段尾；
 //! - 数组先确认字节够再分配，长度乘法溢出按截断处理，计数只决定循环次数不决定预分配：声明巨大计数的坏消息
 //!   不会触发巨量分配；
 //! - 读取经过 `bytes::Buf` 的 `try_get_*` 与带长度检查的切片，下面的 lint 禁止下标与 unwrap，读任务不会因为坏消息 panic。
 //!
 //! CAS 之后的部分解析失败时消息仍然返回（[`Body::Invalid`]），`cas.is_last_msg` 照样能结束数据集；未知类型
-//! 也解析 CAS（C++ 跳过整条消息，丢掉 `isLastMsg` 使两个数据集合并）。
+//! 也解析 CAS，以免丢掉 `isLastMsg` 使两个数据集合并。
 //!
 //! 零拷贝：`u8` 数据（强度、图像像素、Mesh 纹理与用户通道、未知类型的消息体）是帧的切片，持有它们会让整帧存活；
 //! 多字节数组解码为 `Vec`。文本按字节数读取并保留内嵌 NUL，非法 UTF-8 替换为 U+FFFD。
@@ -50,7 +50,7 @@ pub use rendering::{Label, LineSet, Plane, PointSet, Position, Ray, Region, Rend
 pub use spots::{Spot, Spots};
 pub use surface::{SurfaceAttrs, SurfacePointCloud, UniformSurface};
 
-/// GDP 服务端的默认 TCP 端口（`GO_PXL_SDK_DEFAULT_GDP_SERVER_PORT`）。
+/// GDP 服务端的默认 TCP 端口。
 pub const DEFAULT_PORT: u16 = 3601;
 
 /// 消息头（`u32 size` + `u16 type`）的长度，即最短的消息；连接层用
@@ -76,10 +76,10 @@ impl From<TryGetError> for Error {
     }
 }
 
-/// 一条 GDP 消息，对应 C++ 的 `GoGdpMsg` 及其派生类。
+/// 一条 GDP 消息。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
-    /// 消息类型（C++ `MessageType`）：1 Signal、10 Null、11 Stamp、12–18 扫描数据、19 Measurement、20 String、
+    /// 消息类型：1 Signal、10 Null、11 Stamp、12–18 扫描数据、19 Measurement、20 String、
     /// 70 Rendering、71–74 特征；其余为 [`Body::Unknown`]。
     pub ty: u16,
     /// 公共属性段。
@@ -88,7 +88,7 @@ pub struct Message {
     pub body: Body,
 }
 
-/// 公共属性段（Common Attribute Section），对应 C++ 的 `CommonAttributes`。
+/// 公共属性段（CAS）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cas {
     /// 坐标空间：0 无（Stamp、Signal）、1 数据空间（mm，3D）、2 图像空间（像素，2D）。
@@ -105,12 +105,12 @@ pub struct Cas {
     pub data_source_id: String,
     /// 时间戳源 ID（目前是 scanner ID）。
     pub stamp_source_id: String,
-    /// 数据集 ID（原 `FrameId`）；服务端的取值不可靠，组集不用它。
+    /// 数据集 ID；服务端的取值不可靠，组装数据集时只看 `is_last_msg`。
     pub data_set_id: u64,
     /// 是否为数据集的最后一条消息，接收端据此结束一个数据集。
     pub is_last_msg: bool,
     /// 输出 ID（`/controls/gocator/outputs` 的 `outputId`，0 有效）。旧服务端的 CAS 不含此字段，或值为 0xFFFF（未使用）
-    /// 时为 `None`（C++ 总是读取，短 CAS 会读进类型相关部分并失败）。
+    /// 时为 `None`。
     pub gdp_id: Option<u16>,
 }
 
@@ -119,7 +119,7 @@ pub struct Cas {
 pub enum Body {
     /// 类型 1：流上此前的扫描数据全部作废（扫描或数据流开始时发送）。消息体不解析。
     Signal,
-    /// 类型 10：工具发出的状态消息，携带错误状态（`kOK` = 1）。
+    /// 类型 10：工具发出的状态消息，携带错误状态（1 为成功）。
     Null(Status),
     /// 类型 11：帧的时间戳与编码器值。
     Stamp(Stamp),
@@ -157,12 +157,12 @@ pub enum Body {
     Invalid(Error),
 }
 
-/// 时间戳（类型 11，`GoGdpStamp`）。
+/// 时间戳（类型 11）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stamp {
     /// 帧序号，从 0 开始。
     pub frame_index: u64,
-    /// 时间刻度（C++ `Timestamp`）：Gocator 上 µs = 值 / 1.024，AVT 2D 相机上为 ns。
+    /// 时间刻度：Gocator 上 µs = 值 / 1.024，AVT 2D 相机上为 ns。
     pub timestamp: u64,
     /// 编码器计数。
     pub encoder: i64,
@@ -176,7 +176,7 @@ pub struct Stamp {
     pub system_time_nsec: u64,
 }
 
-/// 测量值（类型 19，`GoGdpMeasurement`），字段直接跟在 CAS 之后。
+/// 测量值（类型 19），字段直接跟在 CAS 之后。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Measurement {
     /// 测量值。
@@ -187,10 +187,10 @@ pub struct Measurement {
     pub position: Option<[f64; 3]>,
 }
 
-/// 字符串（类型 20，`GoGdpString`），字段直接跟在 CAS 之后。
+/// 字符串（类型 20），字段直接跟在 CAS 之后。
 #[derive(Clone, Debug, PartialEq)]
 pub struct GdpString {
-    /// 文本，按字节数读取，保留内嵌 NUL（C++ 在 NUL 处截断）。
+    /// 文本，按字节数读取，保留内嵌 NUL。
     pub text: String,
     /// 判定（1.5 新增，目前未使用）；剩余 0 字节时为 0。
     pub decision: u8,
@@ -198,14 +198,14 @@ pub struct GdpString {
     pub position: Option<[f64; 3]>,
 }
 
-/// 点特征（类型 71，`GoGdpFeaturePoint`）。
+/// 点特征（类型 71）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointFeature {
     /// 位置 x、y、z。
     pub position: [f64; 3],
 }
 
-/// 线特征（类型 72，`GoGdpFeatureLine`）。
+/// 线特征（类型 72）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineFeature {
     /// 线上一点 x、y、z。
@@ -214,7 +214,7 @@ pub struct LineFeature {
     pub direction: [f64; 3],
 }
 
-/// 平面特征（类型 73，`GoGdpFeaturePlane`）。
+/// 平面特征（类型 73）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaneFeature {
     /// 法向 x、y、z。
@@ -223,7 +223,7 @@ pub struct PlaneFeature {
     pub distance: f64,
 }
 
-/// 圆特征（类型 74，`GoGdpFeatureCircle`）。
+/// 圆特征（类型 74）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CircleFeature {
     /// 圆心 x、y、z。
@@ -234,7 +234,7 @@ pub struct CircleFeature {
     pub radius: f64,
 }
 
-/// 解码一条完整的消息（含 `u32 size`），对应 C++ 的 `GetGdpMsgType` + `Deserialize`。
+/// 解码一条完整的消息（含 `u32 size`）。
 ///
 /// `size` 必须等于 `frame.len()` 且 ≥ 6，CAS 必须完好，否则返回 `Err`：字节流已经无法信任，由连接层决定断开。
 /// CAS 之后的部分解析失败不返回 `Err`，而是 [`Body::Invalid`]。
@@ -247,7 +247,8 @@ pub fn decode_message(mut frame: Bytes) -> Result<Message, Error> {
 }
 
 /// 解码控制通道 `/dataSources` 流的 bin：连续的完整消息，边界由每条消息的 `size` 决定，`size` 的规则与
-/// [`decode_message`] 相同。流载荷与 GDP-TCP 的消息逐字节相同是协议假设 T4。
+/// [`decode_message`] 相同。这里假定流载荷与 GDP 连接上的消息逐字节相同，见
+/// [协议假设 T4](crate::docs::assumptions)。
 pub fn decode_all(mut payload: Bytes) -> Result<Vec<Message>, Error> {
     let mut messages = Vec::new();
     while payload.has_remaining() {
@@ -290,7 +291,7 @@ impl Cas {
     }
 }
 
-/// 按类型解码 CAS 之后的部分（C++ `MakeGoGdpMsg` 的分派）。
+/// 按类型解码 CAS 之后的部分。
 fn decode_body(ty: u16, buf: &mut Bytes) -> Result<Body, Error> {
     let read_f64 = Bytes::try_get_f64_le;
     Ok(match ty {
@@ -351,11 +352,10 @@ impl Stamp {
     }
 }
 
-/// 打开一个以 `width` 字节小端长度开头的段（长度包含自身），返回段内的字节，`buf` 前进到段尾，
-/// 对应 `kSerializer_BeginRead` + `EndRead`。
+/// 打开一个以 `width` 字节小端长度开头的段（长度包含自身），返回段内的字节，`buf` 前进到段尾。
 ///
-/// 段内读取以返回的切片为界，未读的字段随段尾一起跳过（向前兼容）。长度小于自身宽度（C++ 的 u64 下溢）或超出
-/// 外层段时报 `Malformed`，防止错位读进下一段。
+/// 段内读取以返回的切片为界，未读的字段随段尾一起跳过（向前兼容）。长度小于自身宽度或超出外层段时报
+/// `Malformed`，防止错位读进下一段。
 fn section(buf: &mut Bytes, width: usize) -> Result<Bytes, Error> {
     let size = buf.try_get_uint_le(width)?;
     usize::try_from(size)
@@ -365,7 +365,7 @@ fn section(buf: &mut Bytes, width: usize) -> Result<Bytes, Error> {
         .ok_or(Error::Malformed)
 }
 
-/// 两个尺寸的乘积。溢出时数据不可能放进消息，按截断处理（C++ 用 32 位回绕的乘法）。
+/// 两个尺寸的乘积。溢出时数据不可能放进消息，按截断处理。
 fn product(a: usize, b: usize) -> Result<usize, Error> {
     a.checked_mul(b).ok_or(Error::Truncated)
 }
@@ -432,7 +432,7 @@ fn optional<T>(
     Some(value)
 }
 
-/// 读取 `u8` 布尔值，非 0 为真（C++ 的 `byteValue > 0`）。
+/// 读取 `u8` 布尔值，非 0 为真。
 fn read_bool(buf: &mut Bytes) -> Result<bool, TryGetError> {
     Ok(buf.try_get_u8()? != 0)
 }

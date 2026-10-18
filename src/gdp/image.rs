@@ -1,4 +1,4 @@
-//! 图像（类型 16）与像素格式（`GoGdpPixelFormat`）。
+//! 图像（类型 16）与像素格式。
 
 use std::fmt;
 
@@ -6,18 +6,18 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, array, optional, product, read_bool, section, take};
 
-/// 图像（类型 16，`GoGdpImage`）。
+/// 图像（类型 16）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
     /// 行数。
     pub height: u32,
     /// 每行像素数。
     pub width: u32,
-    /// 每像素字节数；PFNC 格式为 0。
+    /// 每像素字节数；GenICam PFNC 像素格式（见 [`PixelFormat`]）为 0。
     pub pixel_size: u32,
     /// 像素格式。
     pub pixel_format: PixelFormat,
-    /// 拜耳滤镜（`kCfa`）：0 无、1 BG/GR、2 GB/RG、3 RG/GB、4 GR/BG。
+    /// 拜耳滤镜：0 无、1 BG/GR、2 GB/RG、3 RG/GB、4 GR/BG。
     pub color_filter: i32,
     /// 曝光，原样透传。
     pub exposure: f32,
@@ -25,10 +25,9 @@ pub struct Image {
     pub flipped_x: bool,
     /// Y 方向翻转。
     pub flipped_y: bool,
-    /// 转置（C++ `ColumnBased`），在翻转之后应用。
+    /// 转置，在翻转之后应用。
     pub transposed: bool,
-    /// X、Y 分辨率（mm），1.3 新增：属性段内剩余 ≥ 32 字节才与 `offset` 一起读取，否则为 `None`
-    /// （C++ 剩 1 字节就读，越过段尾）。
+    /// X、Y 分辨率（mm，1.3 新增），与 `offset` 是一组可选尾部字段，旧服务端为 `None`。
     pub scale: Option<[f64; 2]>,
     /// X、Y 偏移（mm），1.3 新增，与 `scale` 同时出现。
     pub offset: Option<[f64; 2]>,
@@ -37,8 +36,8 @@ pub struct Image {
 }
 
 impl Image {
-    /// 每行字节数（C++ `RowSize`）：`pixel_size == 0 && color_filter == 0` 时按格式位数紧密排列、向上取整到字节，
-    /// 否则为 `width × pixel_size`。溢出 `usize`（32 位目标）时取最大值，解码时的长度检查报 `Truncated`。
+    /// 每行字节数：`pixel_size == 0 && color_filter == 0` 时按格式位数紧密排列、向上取整到字节，否则为
+    /// `width × pixel_size`。溢出 `usize`（32 位目标）时取 `usize::MAX`，使解码时的长度检查报 `Truncated`。
     pub fn row_size(&self) -> usize {
         if self.pixel_size == 0 && self.color_filter == 0 {
             self.pixel_format.row_bytes(self.width)
@@ -87,13 +86,13 @@ impl Image {
     }
 }
 
-/// 像素格式（C++ `GoGdpPixelFormat::FormatType`，`k32s`）：0–6 是旧式 `kPixelFormat`，其余是 PFNC 风格的
+/// 像素格式（线上为 `i32`）：0–6 是旧式格式，其余按 `GenICam` PFNC 像素格式命名，值为
 /// `ColorType | PixelSize | id`，第 2 字节是每像素位数。未知值原样保留。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PixelFormat(pub i32);
 
 impl PixelFormat {
-    /// 每像素位数（C++ `PixelBits`）：旧式格式查表，其余取第 2 字节；未知的 7–0xFFFF 为 0。
+    /// 每像素位数：旧式格式查表，其余取第 2 字节；未知的 7–0xFFFF 为 0。
     pub fn bits(self) -> u32 {
         match self.0 {
             0 => 0,
@@ -109,12 +108,12 @@ impl PixelFormat {
         }
     }
 
-    /// 是否为旧式格式 0–6（C++ `IsNative`）。
+    /// 是否为旧式格式 0–6。
     pub fn is_legacy(self) -> bool {
         (0..=6).contains(&self.0)
     }
 
-    /// `width` 个像素按位数紧密排列、向上取整到字节的长度。溢出 `usize` 时取最大值，随后的长度检查报 `Truncated`。
+    /// `width` 个像素按位数紧密排列、向上取整到字节的长度；溢出处理同 [`Image::row_size`]。
     pub(super) fn row_bytes(self, width: u32) -> usize {
         let bits = u64::from(width) * u64::from(self.bits());
         usize::try_from(bits.div_ceil(8)).unwrap_or(usize::MAX)
@@ -140,7 +139,7 @@ macro_rules! pixel_formats {
                 pub const $konst: Self = Self($code);
             )*
 
-            /// C++ `GoGdpPixelFormat::ToString` 的名字（0 为 `"Null"`）；未知值为 `None`（C++ 返回 `"UNKNOWN"`）。
+            /// 格式名（0 为 `"Null"`）；未知值为 `None`。
             pub fn name(self) -> Option<&'static str> {
                 match self.0 {
                     $($code => Some($name),)*
@@ -151,7 +150,7 @@ macro_rules! pixel_formats {
     };
 }
 
-// 数值取自 C++ 头文件，不取注释：BayerXX16 是 PFNC 的 0x0110002E 起（.NET 误用 12 位）。
+// 数值按 GenICam PFNC 像素格式命名的编码：BayerXX16 从 0x0110002E 起，第 2 字节为 16 位。
 pixel_formats! {
     NULL = 0 => "Null",
     GREYSCALE_8BPP = 1 => "Greyscale_8BPP",

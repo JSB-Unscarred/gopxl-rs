@@ -1,12 +1,11 @@
 //! LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官方）。
 //!
-//! 目标服务端是 GoPxL 1.5，协议为 REST API 9.0.0；替代随 GoPxL 1.5 发布的官方 C++ `GoPxLSdk` 与
-//! .NET `GoPxLSdkNet`（SDK 自身版本号 8.5.62.52）。
-//! 本 crate 直接实现线上协议（TCP 控制通道、GDP 数据通道、UDP 发现），不链接厂商库，也不依赖 C 库。
+//! 目标服务端是 GoPxL 1.5，协议为 REST API 9.0.0。本 crate 替代官方 SDK，直接实现线上协议（TCP 控制通道、
+//! GDP 数据通道、UDP 发现），纯 Rust 实现。
 //!
 //! 入口：[`System`]（一台设备，拥有控制连接；[`System::resource`] 取得带缓存的资源，[`System::gdp`] 连接数据通道）、
 //! [`gdp::Client`]（测量数据）、[`discovery::discover`]（发现）。
-//! `examples/` 是官方 C++ 示例的移植。连接层基于 tokio，I/O 都是 `async fn`。分层、数据流、所有权、任务与锁、超时与错误见 [`docs::architecture`]，未经真机验证的协议假设见 [`docs::assumptions`]。
+//! `examples/` 演示各项常用操作。连接层基于 tokio，I/O 都是 `async fn`。分层、数据流、所有权、任务与锁、超时与错误见 [`docs::architecture`]，未经真机验证的协议假设见 [`docs::assumptions`]。
 
 pub mod control;
 pub mod discovery;
@@ -24,9 +23,8 @@ pub use error::{DisconnectReason, Error, RequestError, Result};
 pub use system::{RunState, System};
 pub use value::{Map, PointerError, Value};
 
-/// 实现的 REST API 版本，对应 C++ 的 `ApiVersion()`。设备的版本在 `read /version` 的 `apiVersion` 中，主版本
-/// 不同时协议可能不兼容。
+/// 实现的 REST API 版本。设备的版本在 `read /version` 的 `apiVersion` 中，主版本不同时协议可能不兼容。
 pub const API_VERSION: &str = "9.0.0";
 
-/// 对应的 GoPxL 版本，对应 C++ 的 `ReleaseVersion()`。
+/// 目标 GoPxL 版本。
 pub const RELEASE_VERSION: &str = "1.5";

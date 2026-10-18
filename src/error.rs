@@ -1,4 +1,4 @@
-//! 连接层与门面的错误类型 [`Error`]，以及拆连接的原因 [`DisconnectReason`]。变体按调用方能做什么划分：重试或重连
+//! 连接层、`System` 与 `Resource` 的错误类型 [`Error`]，以及断开连接的原因 [`DisconnectReason`]。变体按调用方能做什么划分：重试或重连
 //! （`Connect`、`Timeout`、`Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`、
 //! `Validation`）。
 
@@ -14,8 +14,8 @@ use crate::frame::FrameError;
 /// 本 crate 连接层的 `Result`。
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// 拆掉连接的原因。所有挂起的请求以同一个原因（`Arc`）失败：调用方能做的只有重连，所以各种原因不分别报错。
-/// 主连接、流连接与 GDP 连接的断开都用它表示。
+/// 断开连接的原因，主连接、流连接与 GDP 连接共用。同一条连接上所有挂起的请求以同一个原因（`Arc`）失败：调用方
+/// 能做的只有重连，所以不按原因细分错误变体。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DisconnectReason {
@@ -36,7 +36,7 @@ pub enum DisconnectReason {
     Decode(#[from] InboundError),
 }
 
-/// 连接层的错误，对应 C++ 的 `GoChannelError`（前三个变体）与 `GoRequestError`（`Request`）。
+/// 连接层、`System` 与 `Resource` 的错误，变体的划分见模块文档。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -49,7 +49,7 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    /// 请求已写出，期限内没有应答；文件传输的期限是连续收不到数据的时长。主连接上迟到的应答会被丢弃，连接照常
+    /// 请求已写出，期限内未收到应答；文件传输的期限是连续收不到数据的时长。主连接上迟到的应答会被丢弃，连接照常
     /// 可用。
     #[error("{} {path}: no response within {after:?}", method.as_str())]
     Timeout {
@@ -60,14 +60,13 @@ pub enum Error {
         /// 等待的时长。
         after: Duration,
     },
-    /// 连接已拆掉；同一条连接上所有挂起的请求得到同一个原因。调用方只能重新连接。
+    /// 连接已断开，原因见 [`DisconnectReason`]。
     #[error("connection lost: {0}")]
     Disconnected(Arc<DisconnectReason>),
     /// 服务端的 `status` 不是 OK。
     #[error(transparent)]
     Request(Box<RequestError>),
-    /// 响应成功，但载荷中要读取的字段缺失或无法反序列化（类型不对、整数越界、结构体缺字段；C++ 抛
-    /// `GoJsonError` / `GoResourceError`）。
+    /// 响应成功，但载荷中要读取的字段缺失或无法反序列化（类型不对、整数越界、结构体缺字段）。
     #[error("{path}: payload field {field:?}: {reason}")]
     Payload {
         /// 请求的路径。
@@ -78,7 +77,7 @@ pub enum Error {
         reason: String,
     },
     /// 资源开启了校验（[`Resource::set_validation`](crate::resource::Resource::set_validation)），补丁中 `pointer` 处的值不符合
-    /// schema，请求没有发出，对应 C++ 的 `GoResourceValidationError`。
+    /// schema，请求未发出。
     #[error("{path}: {pointer:?} violates {}", issues.join("; "))]
     Validation {
         /// 资源路径。
@@ -123,7 +122,7 @@ impl fmt::Display for RequestError {
     }
 }
 
-/// 按 `status` 判定成败：只看顶层 `status`，与 SDK 一致；`status` 为 OK 时 `payload.errors` 不升级为错误。
+/// 按 `status` 判定成败：只看顶层 `status`，为 OK 时 `payload.errors` 不升级为错误。
 pub(crate) fn check(method: Method, path: String, response: Response) -> Result<Response> {
     if response.status.is_ok() {
         Ok(response)

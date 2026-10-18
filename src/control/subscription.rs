@@ -1,14 +1,13 @@
-//! 订阅：每个本地订阅一个有界队列，读任务按服务端的匹配规则投递，消费者在自己的任务上拉取。对应 C++ 的
-//! `Sub` / `UnSub` 与 `SetSubHandler`；回调式的 `AddNotificationListener` 即在自己的任务里循环 `recv`。
+//! 订阅：每个本地订阅一个有界队列，读任务按服务端的匹配规则投递，消费者在自己的任务上拉取；需要回调时在自己的
+//! 任务里循环 `recv`。
 //!
-//! C++ 每条通知起一个线程（乱序、线程数无上限），回调在锁内执行会重入死锁，`sub` 失败时监听器留在表里，本地
-//! 分派也与服务端的匹配规则不一致。这里：
-//! - 读任务只把通知放进队列，从不执行用户代码；队列满了丢最老的并记下条数（[`Notice::Lagged`]），读任务从不等待；
+//! - 读任务只把通知放进队列，从不执行用户代码，用户代码因此不会阻塞读任务或在锁内重入；队列满了丢最老的并记下
+//!   条数（[`Notice::Lagged`]），读任务从不等待；
 //! - 同一个表达式的本地订阅共享服务端的一个订阅：每次 `subscribe` 都发送自己的 `sub`（服务端对同一文本先删后加，
-//!   重复无害，协议假设 S1），最后一个本地订阅退订时发送 `unSub`。登记、注销与写出都在写锁内，所以 `unSub` 在
-//!   服务端排在之前的 `sub` 之后、之后的 `sub` 之前；超时之后才执行的 `sub` 也会被它撤销。
-//!   [`Subscription::unsubscribe`] 等写出完成；Drop 不能 await，把 `unSub` 交给一个 task，运行时已停时只能让
-//!   服务端在连接关闭时忘记订阅。
+//!   重复无害，见[协议假设 S1](crate::docs::assumptions)），最后一个本地订阅退订时发送 `unSub`。登记、注销与写出
+//!   都在写锁内，所以 `unSub` 在线上排在之前的 `sub` 之后、之后的 `sub` 之前。`sub` 等应答超时后订阅随即注销，
+//!   `unSub` 排在这个 `sub` 之后，所以服务端即使在超时之后才执行这个 `sub`，也会接着执行 `unSub` 把它撤销。
+//!   退订的两种方式见 [`Subscription`]。
 
 use std::collections::VecDeque;
 use std::mem;
@@ -26,7 +25,7 @@ use crate::net::lock;
 /// 每个订阅队列的容量。通知很小（只有 `/system`、`/replay` 的通知带载荷），只按条数设上限。
 const CAPACITY: usize = 1024;
 
-/// `sub` 等待应答的超时（SDK 为 5 s）。
+/// `sub` 等待应答的超时。
 const SUB_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 订阅队列里取出的一项。
@@ -38,10 +37,12 @@ pub enum Notice {
     Lagged(u64),
 }
 
-/// 一个本地订阅，对应 C++ 的 `Sub` 加上 `SetSubHandler` 中按路径的筛选。
+/// 一个本地订阅，只收到服务端按这个表达式会投递的通知；可以移到别的任务。
 ///
-/// owned、`Send`，可以移到别的任务。只收到服务端按这个表达式会投递的通知。[`unsubscribe`](Self::unsubscribe) 或
-/// Drop 时注销：是该表达式最后一个本地订阅时写出 `unSub`，不等待应答（C++ 的析构等待 `UnSub` 的应答，最多阻塞 5 s）。
+/// [`unsubscribe`](Self::unsubscribe) 或 Drop 时注销：是该表达式最后一个本地订阅时写出 `unSub`，不等待应答，所以
+/// Drop 从不阻塞。Drop 不能 await，于是把 `unSub` 交给一个 tokio task 写出；当前线程不在 tokio 运行时里时不发，
+/// 服务端在连接关闭时清除订阅。task 写出之前若别的任务订阅了同一表达式，`unSub` 会把那个订阅一起撤销；需要确定的
+/// 顺序时用 `unsubscribe`。
 #[derive(Debug)]
 pub struct Subscription {
     client: Client,
@@ -136,8 +137,9 @@ impl Subscription {
         }
     }
 
-    /// 注销并等 `unSub` 写出（是该表达式最后一个本地订阅时才写），不等应答：迟到的应答由墓碑吸收。注销与写出在
-    /// 写锁内，别的任务此刻订阅同一表达式也不会被误撤销。连接已断开时报 `Disconnected`，服务端早已忘记订阅。
+    /// 注销并等 `unSub` 写出（是该表达式最后一个本地订阅时才写），不等应答，迟到的应答到达时被丢弃。注销与写出
+    /// 之间别的任务插不进 `sub`，同一表达式的新订阅不会被撤销。连接已断开时报 `Disconnected`，服务端在连接关闭时
+    /// 已清除订阅。
     pub async fn unsubscribe(self) -> Result<()> {
         let shared = &self.client.shared;
         let mut writer = shared.writer.lock().await;
@@ -151,8 +153,7 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        // 不能在 Drop 里 await：注销是同步的，unSub 交给一个 task，运行时已停时只能让服务端在连接关闭时忘记订阅。
-        // task 写出之前别的任务若订阅了同一表达式，unSub 会把它一起撤销；要确定的顺序用 unsubscribe。
+        // 注销是同步的；unSub 交给 task 写出的理由与代价见类型文档。
         if let Some(request) = unregister(&self.client.shared, &self.queue) {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let client = self.client.clone();
@@ -164,7 +165,7 @@ impl Drop for Subscription {
     }
 }
 
-/// 从分派表移除 `queue`；是该表达式最后一个本地订阅时返回要写出的 `unSub`。队列已不在表里（第二次调用）时为
+/// 从订阅表移除 `queue`；是该表达式最后一个本地订阅时返回要写出的 `unSub`。队列已不在表里（第二次调用）时为
 /// `None`。
 fn unregister(shared: &Shared, queue: &Arc<SubQueue>) -> Option<Request> {
     let mut dispatch = lock(&shared.dispatch);
@@ -236,14 +237,14 @@ pub(super) fn deliver(subs: &[Weak<SubQueue>], notification: Notification) {
     }
 }
 
-/// 拆连接时关闭所有订阅队列，等待中的消费者随即返回。
+/// 断开连接时关闭所有订阅队列，等待中的消费者随即返回。
 pub(super) fn close_all(subs: &[Weak<SubQueue>]) {
     for queue in subs.iter().filter_map(Weak::upgrade) {
         queue.close();
     }
 }
 
-// 丢最老与 Lagged 计数是自有算法，出错时通知静默丢失，消费者察觉不到缺口。
+// 丢最老与 Lagged 计数出错时通知静默丢失，消费者察觉不到缺口。
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

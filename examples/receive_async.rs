@@ -1,10 +1,7 @@
-//! 持续接收 GDP 数据直到按下回车，对应 C++ 示例 `ReceiveAsync`（`ReceiveDataAsync` 加回调）。
+//! 持续接收 GDP 数据直到按下回车。
 //!
-//! 示例把时间戳（stamp）加入 GDP 输出，等到第一个数据集（最多 3 s）后循环 `receive` 并打印每个数据集。
-//! 方法对任何 GDP 数据类型都适用。
-//!
-//! 与 C++ 的差异：C++ 在接收线程的回调里打印、主线程跨线程读写普通的 `bool dataReceived`（数据竞争）；这里
-//! `select!` 同时等数据集与回车（stdin 由一个阻塞线程读），回车即退出。
+//! 示例把时间戳（stamp）加入 GDP 输出，等到第一个数据集（最多 3 s）后循环 `receive` 并打印每个数据集；
+//! `select!` 同时等数据集与回车（stdin 由一个阻塞线程读），回车即停止设备并退出。方法对任何 GDP 数据类型都适用。
 
 mod common;
 
@@ -45,7 +42,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 打印一个数据集，对应 C++ 的回调 `onData`。
+/// 打印一个数据集。
 fn on_data(data_set: &[Message]) {
     for (i, message) in data_set.iter().enumerate() {
         println!("{} GDP Output Source {}", "-".repeat(64), i + 1);

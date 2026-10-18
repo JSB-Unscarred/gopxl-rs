@@ -1,6 +1,7 @@
-//! 连接层的进程内测试：回环地址上的 `TcpListener` 扮演服务端，脚本在自己的线程里按 carrier 帧格式收发请求与响应，
-//! 客户端跑在 tokio 的测试运行时上。只钉住本 crate 自有、无法与官方 SDK 对照的任务与所有权约定（FIFO 墓碑、
-//! 拆连接一次、Drop 不阻塞、订阅的本地引用计数、流的早到消息、资源缓存失效、GDP 组集）；协议事实留给真机上的示例验证。
+//! 连接层的进程内测试：回环地址上的 `TcpListener` 扮演服务端，脚本在自己的线程里按控制通道的帧格式（长度、载荷
+//! 类型 `0xB000` 与 MessagePack 消息体）收发请求与响应，客户端跑在 tokio 的测试运行时上。只钉住本 crate 自己的任务
+//! 与所有权约定（超时请求在等待队列中的位置保留、断开连接只执行一次、Drop 不阻塞、订阅的本地引用计数、流的早到消息、资源缓存
+//! 失效、GDP 组装数据集）；协议事实留给真机上的示例验证。
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -16,7 +17,7 @@ use gopxl::value::msgpack;
 use gopxl::{DisconnectReason, Error, Value};
 use tokio::sync::mpsc;
 
-/// carrier 类型：MessagePack。
+/// 帧的载荷类型：MessagePack。
 const MSGPACK: u16 = 0xB000;
 
 /// 脚本与客户端每一步等待的上限：对方卡住时测试失败而不是挂起。
@@ -48,7 +49,7 @@ fn accept(listener: &TcpListener) -> TcpStream {
     conn
 }
 
-/// 读一个客户端 → 服务端的 carrier 帧（`u32 Length`、`u16 0xB000`、`u32 N`、N 字节 MessagePack），返回消息体。
+/// 读一个客户端 → 服务端的帧（`u32 Length`、`u16 0xB000`、`u32 N`、N 字节 MessagePack），返回消息体。
 fn read_request(conn: &mut TcpStream) -> Value {
     let mut length = [0; 4];
     conn.read_exact(&mut length).unwrap();
@@ -79,7 +80,7 @@ fn write_message(conn: &mut TcpStream, body: &Value) {
     conn.write_all(&frame).unwrap();
 }
 
-/// 等对端关闭：客户端 Drop 即 shutdown，这里读到 EOF（Windows 上也可能是连接重置）；[`STEP`] 内没有关闭即失败。
+/// 等对端关闭：客户端 Drop 即 shutdown，这里读到 EOF（Windows 上也可能是连接重置）；[`STEP`] 内未关闭即失败。
 fn wait_for_close(conn: &mut TcpStream) {
     let mut byte = [0];
     match conn.read(&mut byte) {
@@ -92,6 +93,7 @@ fn wait_for_close(conn: &mut TcpStream) {
     }
 }
 
+/// 解析 JSON 文本。
 fn json(text: &str) -> Value {
     text.parse().unwrap()
 }
@@ -135,8 +137,8 @@ fn gdp_signal(is_last: bool) -> Vec<u8> {
     message
 }
 
-// FIFO 对应与墓碑：超时的请求丢弃接收端后，它的槽位仍占住 FIFO 的位置吸收迟到的响应；下一个请求拿到自己的响应，
-// 连接照常可用（C++ SDK 此后全部错位）。Connection Drop 即 shutdown，对端读到 EOF。
+// 应答按请求的发出顺序（FIFO）匹配：超时的请求丢弃接收端后，它在等待队列中的位置仍保留，迟到的响应被丢弃；下一个
+// 请求拿到自己的响应，连接照常可用。Connection Drop 即 shutdown，对端读到 EOF。
 #[tokio::test]
 async fn late_response_is_absorbed_by_the_timed_out_slot() {
     let server = Server::start(|listener| {
@@ -162,7 +164,7 @@ async fn late_response_is_absorbed_by_the_timed_out_slot() {
     server.finish();
 }
 
-// 拆连接只执行一次：服务端关闭连接时，所有挂起的请求以同一个 Arc 原因（Eof）失败；之后 is_connected 为假，新请求与
+// 断开连接只执行一次：服务端关闭连接时，所有挂起的请求以同一个 Arc 原因（Eof）失败；之后 is_connected 为假，新请求与
 // 等待中的订阅都立即报 Disconnected。
 #[tokio::test]
 async fn server_close_fails_every_pending_request_with_one_reason() {
@@ -255,7 +257,7 @@ async fn last_local_subscription_sends_unsub() {
         }
         write_message(&mut conn, &notification("/system"));
         write_message(&mut conn, &notification("/tools/1"));
-        // 第一个订阅 Drop 后没有 unSub：下一帧已经是探针请求。
+        // 第一个订阅 Drop 后不写 unSub：下一帧已经是探针请求。
         expect_request(&mut conn, "read", "/probe");
         write_message(&mut conn, &response(Value::Nil));
         expect_request(&mut conn, "unSub", "/system");
@@ -271,7 +273,7 @@ async fn last_local_subscription_sends_unsub() {
     }
     drop(first);
     client.read("/probe").response().await.unwrap();
-    // 两条通知都排在探针的应答之前，/tools/1 的那条没有投给 /system 的订阅。
+    // 两条通知都排在探针的应答之前，/tools/1 的那条不投给 /system 的订阅。
     assert!(second.try_recv().unwrap().is_none());
     second.unsubscribe().await.unwrap();
     drop(connection);

@@ -1,8 +1,7 @@
-//! UDP 发现的 socket 部分：[`discover`] 在调用方的任务上广播命令、收集回复，对应 C++ 的
-//! `GoDiscoveryClient::BlockingDiscover`。
+//! UDP 发现的 socket 部分：[`discover`] 在调用方的任务上广播命令、收集回复。
 //!
-//! 修掉 C++ 的问题：单个网卡发送失败不影响其他网卡；接收缓冲 2048 字节，大于
-//! 服务端最长的 1536 字节回复；Discover 按 0、300、1000 ms 重发，UDP 丢一个包不会漏掉设备；每次调用都是全新的状态。
+//! 单个网卡发送失败不影响其他网卡；接收缓冲 2048 字节，大于服务端最长的 1536 字节回复；Discover 按 0、300、
+//! 1000 ms 重发，UDP 丢一个包不会漏掉设备；每次调用都从全新的状态开始。
 
 use std::future::pending;
 use std::io;
@@ -22,7 +21,7 @@ const RESEND_AT: [Duration; 3] = [
     Duration::from_millis(1000),
 ];
 
-/// 发现所有 GoPxL 实例，等满 `timeout` 才返回（与 C++ 相同，回复的数量事先未知）。
+/// 发现所有 GoPxL 实例，等满 `timeout` 才返回：回复的数量事先未知。
 ///
 /// 实例按（地址，Web 端口）去重，先到者胜。绑定 3320 失败时返回错误：服务端本身也绑定这个端口，所以接收
 /// socket 设置 `SO_REUSEADDR`，本机运行 GoPxL PC 应用时同样能发现它。
@@ -108,9 +107,9 @@ fn receiver(port: u16) -> io::Result<UdpSocket> {
     UdpSocket::from_std(socket.into())
 }
 
-/// 每个已启用的非回环（协议假设 D2）IPv4 地址一个发送 socket，绑定临时端口（协议假设 D1）：受限广播只从绑定地址
-/// 所在的网卡发出，多网卡的工控机要逐个发送。包含 169.254.x.x：直连设备、没有 DHCP 时网卡就是这类地址。单个网卡
-/// 出错只跳过它。
+/// 每个已启用的非回环 IPv4 地址一个发送 socket，绑定临时端口：受限广播只从绑定地址所在的网卡发出，多网卡的工控机
+/// 要逐个发送。包含 169.254.x.x：直连设备、无 DHCP 服务时网卡就是这类地址。单个网卡出错只跳过它。跳过回环见
+/// [协议假设 D2](crate::docs::assumptions)，临时端口见 [协议假设 D1](crate::docs::assumptions)。
 fn senders() -> io::Result<Vec<UdpSocket>> {
     let senders = if_addrs::get_if_addrs()?
         .into_iter()

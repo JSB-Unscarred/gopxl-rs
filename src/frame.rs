@@ -80,8 +80,9 @@ impl FrameReader {
         })
     }
 
-    /// 供驱动追加字节的缓冲区，在 [`next_frame`](Self::next_frame) 返回 `None` 之后调用。已切出的帧丢弃（剩下的
-    /// 不足一帧，每次读取最多搬一次）；长度已知且超过一块读取时按长度精确预留，否则预留一块。
+    /// 供驱动追加字节的缓冲区，在 [`next_frame`](Self::next_frame) 返回 `None` 之后调用。已切出的帧在这里丢弃，
+    /// 剩下的字节不足一帧，每次读取之前最多把它们搬到缓冲开头一次；长度已知且超过一块读取时按长度精确预留，否则
+    /// 预留一块。
     pub fn buffer(&mut self) -> &mut Vec<u8> {
         self.buf.drain(..self.start);
         self.start = 0;
@@ -118,7 +119,7 @@ impl FrameReader {
         Ok(Some(frame))
     }
 
-    /// 是否没有未切出的字节，即 EOF 落在帧边界上。
+    /// 已收到的字节是否都已切成帧，即 EOF 落在帧边界上。
     pub fn is_empty(&self) -> bool {
         self.start == self.buf.len()
     }

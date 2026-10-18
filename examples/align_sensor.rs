@@ -1,6 +1,6 @@
-//! 清除并重新对准扫描器，打印对准状态与变换，对应 C++ 示例 `AlignSensor`。
+//! 清除并重新对准扫描器，打印对准状态与变换。
 //!
-//! 传感器上要有扫描数据才能对准成功；对准可能耗时数秒（G3 传感器更久）。示例先把当前作业另存为
+//! 传感器上要有扫描数据才能对准成功；对准可能耗时数秒，传感器型号不同耗时也不同。示例先把当前作业另存为
 //! `SDK_alignment_sample`，然后覆盖设备上的对准结果。
 
 mod common;
@@ -40,7 +40,7 @@ async fn main() -> common::Result {
         .response()
         .await?;
 
-    // align 的应答可能在对准完成之前返回（协议手册），所以每秒读一次 alignState，直到不再是“对准中”。
+    // align 的应答可能在对准完成之前返回（协议手册），所以每秒读一次 alignState，直到状态离开“对准中”。
     let state = loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let state = common::read_at(client, &alignment_path, "/alignState")

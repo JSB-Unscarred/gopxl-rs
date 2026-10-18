@@ -1,11 +1,10 @@
-//! 控制通道（TCP）：连接（[`Connection`]、[`Client`]、[`Subscription`]、[`StreamHandle`]，对应 C++ 的
-//! `GoRestClient`）与线上编解码（carrier 帧与 MessagePack 消息体，对应 `GoRequest`、`GoResponse` 与
-//! `GoCtrlChannelV1` 的帧格式）。
+//! 控制通道（TCP）：连接（[`Connection`]、[`Client`]、[`Subscription`]、[`StreamHandle`]）与线上编解码。
 //!
 //! 一台设备的连接：主连接（`Connection` 拥有，`Client` 发请求与订阅）、每个流一条（`StreamHandle`）、每次文件传输
-//! 一条临时连接（[`Client::transfer`]），对应 C++ 在一条连接上承载的全部流量。
+//! 一条临时连接（[`Client::transfer`]）。
 //!
-//! carrier 帧的整数都是小端，`Length` 包含自身 4 字节：
+//! 线上的每条消息装在一个 carrier 帧里：帧头给出长度与消息体格式，消息体是 MessagePack。整数都是小端，`Length`
+//! 包含自身 4 字节：
 //!
 //! | 方向 | 帧头 | 消息体 |
 //! |---|---|---|
@@ -13,17 +12,16 @@
 //! | 服务端 → 客户端 | `u32 Length = 14 + N`、`u16 0xB000`、`i32 CarrierStatus`、`u32 N` | N 字节 MessagePack |
 //!
 //! 只用 0xB000（MessagePack）：服务端按请求的格式回复，通知与流消息跟随最近一次请求的格式，所以只发 0xB000 的
-//! 客户端只会收到 0xB000（C++ SDK 也只收 0xB000）。
+//! 客户端只会收到 0xB000。
 //!
-//! 服务端从不产生的输入一律是坏帧，[`Inbound::decode`] 返回 `Err`，由连接层拆掉连接：类型不是 0xB000、
+//! 服务端从不产生的输入一律是坏帧，[`Inbound::decode`] 返回 `Err`，连接层随即断开连接：类型不是 0xB000、
 //! `DataLength` 超出帧、消息体不是 MessagePack 对象，或缺少 / 类型错误的必需字段（包括 response 的 `status`）。
-//! C++ SDK 在 `DataLength` 越界时读进下一帧而错位；其余情况报读错误并丢弃该消息，等待中的请求不会失败，FIFO
-//! 随之错位；缺少 `status` 的响应被当作成功。`CarrierStatus` 与 C++ 一样不检查：
-//! 内存不足等错误路径上的带帧错误响应照常交给它的请求。
-//! 未知的 `type`（如 `debug`）得到 [`Inbound::Other`] 由调用方忽略；C++ 把它当作响应，会错配等待中的请求。
+//! 跳过坏帧会让之后的响应与请求错配，断开则让挂起的请求立即失败。`CarrierStatus` 不检查：服务端在内存不足等
+//! 错误路径上也会带帧发出错误响应，它照常交给对应的请求。未知的 `type`（如 `debug`）得到 [`Inbound::Other`]，
+//! 由调用方忽略，不占用任何请求的应答。
 //!
-//! 连接层只调用不做 I/O 的部分：主连接的 FIFO 对应器 `ControlCore`（crate 内部）与按服务端规则判断通知投递的
-//! [`SubscriptionExpr`]。
+//! 连接层只调用不做 I/O 的部分：主连接上按发送顺序配对请求与响应的状态机（crate 内部），以及按服务端规则判断
+//! 通知投递的 [`SubscriptionExpr`]。
 
 #![deny(
     clippy::indexing_slicing,
@@ -54,7 +52,7 @@ use bytes::{Buf, Bytes};
 use crate::value::msgpack::{self, DecodeError, EncodeError};
 use crate::value::{Map, Value};
 
-/// 控制通道的默认端口（`GO_PXL_SDK_DEFAULT_CONTROL_PORT`）。
+/// 控制通道的默认端口。
 pub const DEFAULT_PORT: u16 = 3600;
 
 /// 服务端 → 客户端 carrier 帧头的长度，也是最短的合法帧；连接层用 `FrameReader::new(HEADER_LEN, max)` 读帧。
@@ -66,7 +64,7 @@ const REQUEST_HEADER_LEN: u32 = 10;
 /// carrier 类型：消息体是 MessagePack。
 const MSGPACK: u16 = 0xB000;
 
-/// 请求方法，对应 `GoRequestMethod`。服务端按字符串精确匹配（区分大小写）。
+/// 请求方法。服务端按字符串精确匹配（区分大小写）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Method {
     /// `create`：创建资源。
@@ -83,20 +81,20 @@ pub enum Method {
     Sub,
     /// `unSub`：取消订阅。
     UnSub,
-    /// `listSub`：列出当前的订阅（C++ SDK 未提供）。
+    /// `listSub`：列出当前的订阅。
     ListSub,
-    /// `clearSub`：清除全部订阅（C++ SDK 未提供）。
+    /// `clearSub`：清除全部订阅。
     ClearSub,
-    /// `stream`：开始流（C++ 的 `StartStream`）。
+    /// `stream`：开始流。
     Stream,
-    /// `cancelStream`：结束流，路径与 `stream` 请求的完全相同（C++ 的 `StopStream`）。
+    /// `cancelStream`：结束流，路径与 `stream` 请求的完全相同。
     CancelStream,
-    /// `listStream`：列出当前的流（C++ SDK 未提供）。
+    /// `listStream`：列出当前的流。
     ListStream,
 }
 
 impl Method {
-    /// 线上的方法名。拼写与服务端一致（`unSub`、`cancelStream` …）；.NET SDK 发送全小写的名字，服务端回复 −997。
+    /// 线上的方法名。拼写与服务端一致（`unSub`、`cancelStream` …）；大小写不符时服务端回复 −997（[`Status::PARAMETER`]）。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Create => "create",
@@ -115,7 +113,7 @@ impl Method {
     }
 }
 
-/// 一个请求，对应 `GoRequest`。线上不带请求 id，响应按发送顺序与请求配对。
+/// 一个请求。线上不带请求 id，响应按发送顺序与请求配对。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     /// 方法。
@@ -129,7 +127,7 @@ pub struct Request {
 }
 
 impl Request {
-    /// `payload` 与 `args` 为空对象（线上 `0x80`），与 C++ 的默认值 `GoJson()` 逐字节一致。
+    /// 不带载荷与参数的请求：`payload` 与 `args` 为空对象（线上 `0x80`）。
     pub fn new(method: Method, path: impl Into<String>) -> Self {
         Self {
             method,
@@ -151,10 +149,9 @@ impl Request {
         }
     }
 
-    /// 把整帧（carrier 头与消息体）追加到 `out`，对应 `GoRequest::ToByteArray` 加上 carrier 头。消息体是
-    /// `{args, method, path, payload}`（`Map` 按键排序，与 C++ SDK 的字节相同；克隆 `Bin` 只增加引用计数）。
-    /// `Length` 超过 `u32::MAX` 时返回 `EncodeError` 并把 `out` 恢复到原长度：C++ 先写出截断的长度再报错，
-    /// 字节流随之错位。
+    /// 把整帧（carrier 头与消息体）追加到 `out`。消息体是 `{args, method, path, payload}`（`Map` 按键排序；
+    /// 克隆 `Bin` 只增加引用计数）。`Length` 超过 `u32::MAX` 时返回 `EncodeError` 并把 `out` 恢复到原长度，
+    /// 截断的长度字段不会留在 `out` 里使字节流错位。
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
         let body = Value::Map(Map::from([
             ("args".to_owned(), self.args.clone()),
@@ -183,18 +180,18 @@ impl Request {
     }
 }
 
-/// 请求的响应（`type: "response"`），对应 `GoRequestResponse`。
+/// 请求的响应（`type: "response"`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Response {
     /// 请求的结果；`status` 为 OK 时载荷仍可能带 `errors`（例如重复开始同一个流）。
     pub status: Status,
-    /// 资源路径；服务端只在处理函数给出时写入，缺失时为空串（同 C++ 的 `Path()`），不能用来配对请求。
+    /// 资源路径；服务端只在处理函数给出时写入，缺失时为空串，不能用来配对请求。
     pub path: String,
     /// 载荷，任意类型；缺失时为 `Nil`。
     pub payload: Value,
 }
 
-/// 订阅的通知（`type: "notification"`），对应 `GoNotificationResponse`。
+/// 订阅的通知（`type: "notification"`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notification {
     /// 事件类型。
@@ -205,7 +202,7 @@ pub struct Notification {
     pub payload: Value,
 }
 
-/// 通知的事件类型（`eventType`），对应 `GoNotificationType`。
+/// 通知的事件类型（`eventType`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventType {
     /// `created`。
@@ -216,7 +213,7 @@ pub enum EventType {
     Deleted,
     /// `embeddedUpdated`：嵌入的子资源发生变化。
     EmbeddedUpdated,
-    /// 其他字符串（服务端对非法枚举值写 `"Unknown"`）。C++ 把它们当作 `Updated`。
+    /// 其他字符串（服务端对非法枚举值写 `"Unknown"`）。
     Other(String),
 }
 
@@ -233,7 +230,7 @@ impl EventType {
     }
 }
 
-/// 流消息（`type: "stream"`），对应 `GoStreamResponse`。
+/// 流消息（`type: "stream"`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamMessage {
     /// 流 id，即 `stream` 请求的响应载荷中的 `streamId`。
@@ -288,7 +285,7 @@ pub enum Inbound {
 
 impl Inbound {
     /// 解码一帧。`frame` 是 [`FrameReader`](crate::frame::FrameReader) 返回的整帧，`Length` 必须等于帧长；
-    /// `DataLength` 之后的尾随字节忽略（与 SDK 相同）。
+    /// `DataLength` 之后的尾随字节忽略。
     ///
     /// 必需字段：response 的 `status`（整数且在 `i32` 内）；notification 的 `eventType`、`path`；stream 的
     /// `streamId`（整数且在 `u32` 内）、`streamStatus`、`status`、`path`。`payload` 缺失为 `Nil`。
@@ -364,8 +361,8 @@ fn take_str(msg: &mut Map, key: &'static str) -> Result<String, InboundError> {
     }
 }
 
-/// 读取整数字段（任意 marker 宽度）；缺失、不是整数或超出 `T` 时报 `Field(key)`。
-/// C++ 用 `static_cast` 接受布尔与浮点数并回绕越界值，这里一律视为坏帧。
+/// 读取整数字段（任意 marker 宽度）；缺失、不是整数（包括布尔与浮点数）或超出 `T` 时报 `Field(key)`：
+/// 服务端从不发出这些值，按坏帧处理。
 fn get_int<T: TryFrom<i64>>(msg: &Map, key: &'static str) -> Result<T, InboundError> {
     msg.get(key)
         .and_then(Value::as_i64)

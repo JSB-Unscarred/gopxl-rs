@@ -1,17 +1,18 @@
-//! 主控制连接：[`Connection`] 拥有连接，[`Client`] 发请求，[`Transaction`] 等应答。对应 C++ 的 `GoRestClient`。
+//! 主控制连接：[`Connection`] 拥有连接，[`Client`] 发请求，[`Transaction`] 等应答。
+//!
+//! 线上的请求不带 id，响应按发送顺序配对：[`ControlCore`] 维护挂起请求的等待队列，每个响应交给队首。
 //!
 //! 一条连接一个读任务，请求在调用方的任务上写出：
-//! - 调用方在写锁内先 [`ControlCore::register`] 再写出整帧，槽位顺序因此等于线上顺序；写出失败或超时（10 s）
-//!   可能只写出了半帧，立即拆连接；
-//! - 读任务无超时地读帧、解码，再取分派锁交给 [`ControlCore`]，通知放进订阅队列；
-//! - 锁的顺序固定为写锁（tokio `Mutex`，跨 await 持有）→ 分派锁（std `Mutex`，不跨 await）。读任务只取分派锁：
-//!   服务端停止读取、写出被阻塞时读任务照常读，否则双方都在写、都不读；读任务也从不等待消费者（订阅队列满了丢
-//!   最老的），服务端的 10 s 写超时会断开读得慢的客户端。
+//! - 调用方持写锁，先在等待队列登记（[`ControlCore::register`]）再写出整帧，等待队列的顺序因此等于线上顺序；
+//!   写出失败或超时（10 s）时可能只写出了半帧，立即断开连接；
+//! - 读任务无超时地读帧、解码，再取分派锁（保护等待队列与订阅表）交给 `ControlCore`，通知放进订阅队列；
+//! - 锁的顺序固定为写锁（tokio `Mutex`，跨 await 持有）→ 分派锁（std `Mutex`，不跨 await）。读任务只取分派锁，
+//!   所以服务端暂停读取、调用方的写出被阻塞时，读任务仍在读；若读任务也等写锁，客户端与服务端会同时卡在写出上、
+//!   谁都不读。读任务也从不等待消费者（订阅队列满了丢最老的），读得慢的客户端由服务端的 10 s 写超时断开。
 //!
-//! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown 并中止读任务、所有挂起的请求以同一个原因失败、
+//! 断开连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown 并中止读任务、所有挂起的请求以同一个原因失败、
 //! 关闭订阅队列。读错误、EOF、坏帧、写失败与 `Connection` 的 Drop 都走这里；之后 [`Client::is_connected`] 为假，
-//! 每个等待都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的请求失败，EOF 时忙等，
-//! `IsConnected` 一直为真。
+//! 每个等待都返回 `Disconnected(原因)`，断开只经这个错误通知调用方。
 
 use std::convert::Infallible;
 use std::fmt;
@@ -30,16 +31,16 @@ use crate::frame::FrameReader;
 use crate::net::{self, Link, MAX_FRAME, lock};
 use crate::value::Value;
 
-/// 建立控制连接的超时（SDK 默认值）。
+/// 建立控制连接的超时。
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// 请求等待应答的默认超时（SDK 的 `CheckResponse(3000)`）。
+/// 请求等待应答的默认超时。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 主控制连接的唯一 owner，对应 C++ 的 `GoRestClient` / `GoSystem` 的连接部分。
+/// 主控制连接的唯一所有者，不能 clone。
 ///
-/// 不 `Clone`；Drop 即断开（C++ 的 `Disconnect`）：拆连接、所有挂起的请求以 [`DisconnectReason::Closed`] 失败，
-/// 读任务中止，不触发断开回调。请求、订阅与流经 [`client`](Self::client) 发出。
+/// Drop 即断开连接：所有挂起的请求以 [`DisconnectReason::Closed`] 失败，读任务中止。请求、订阅与流经
+/// [`client`](Self::client) 发出。
 #[derive(Debug)]
 pub struct Connection {
     client: Client,
@@ -83,8 +84,8 @@ impl Drop for Connection {
     }
 }
 
-/// 主连接的 owned 句柄：发请求、订阅、开流，不拥有连接。`Connection` Drop 之后，经它发出的请求立即以
-/// `Disconnected(Closed)` 失败。
+/// 主连接的句柄：发请求、订阅、开流；可以 clone、移到别的任务，但不让连接存活。`Connection` Drop 之后，经它
+/// 发出的请求立即以 `Disconnected(Closed)` 失败。
 #[derive(Clone)]
 pub struct Client {
     pub(super) shared: Arc<Shared>,
@@ -94,8 +95,8 @@ pub struct Client {
 pub(super) struct Shared {
     addr: SocketAddr,
     pub(super) link: Link,
-    /// 写锁，锁内是 socket 的写半边：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在
-    /// 它里面。读任务持有读半边，不取这把锁。
+    /// 写锁，锁内是 socket 的写半边：整帧写出期间持有，保证帧不交错、等待队列的顺序等于线上顺序；订阅的登记与
+    /// 注销也在它里面。读任务持有读半边，不取这把锁。
     pub(super) writer: tokio::sync::Mutex<OwnedWriteHalf>,
     /// 分派锁：读任务处理每一帧时持有。
     pub(super) dispatch: Mutex<Dispatch>,
@@ -103,7 +104,7 @@ pub(super) struct Shared {
     writes: AtomicU64,
 }
 
-/// 分派锁保护的状态：读任务按帧更新 FIFO 对应器与订阅队列。
+/// 分派锁保护的状态：读任务按帧更新等待队列，并把通知投给订阅队列。
 #[derive(Default)]
 pub(super) struct Dispatch {
     core: ControlCore,
@@ -112,7 +113,7 @@ pub(super) struct Dispatch {
 }
 
 impl Shared {
-    /// 读任务：读帧、解码、分派，直到出错或 EOF，返回拆连接的原因。
+    /// 读任务：读帧、解码、分派，直到出错或 EOF，返回断开的原因。
     async fn read_frames(
         &self,
         mut reader: OwnedReadHalf,
@@ -130,7 +131,8 @@ impl Shared {
         }
     }
 
-    /// 拆连接，只有第一次调用生效。shutdown 在 `fail_all` 之前：之后登记的槽位，其写出必然失败。
+    /// 断开连接，只有第一次调用生效。shutdown 在 `fail_all` 之前，所以 `fail_all` 之后才登记的请求写出必然失败，
+    /// 不会在等待队列里一直挂着。
     pub(super) fn teardown(&self, reason: DisconnectReason) {
         let Some(reason) = self.link.finish(reason) else {
             return;
@@ -140,7 +142,7 @@ impl Shared {
         subscription::close_all(&dispatch.subs);
     }
 
-    /// 可能改变服务端状态的请求（与 C++ 触发 `NonIdempotentRequestHandler` 的方法相同）计入写计数。
+    /// 可能改变服务端状态的请求（`create`、`update`、`delete`、`call`）计入变更请求数。
     pub(super) fn count_write(&self, method: Method) {
         if matches!(
             method,
@@ -184,8 +186,8 @@ pub(super) fn encode(request: &Request) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
-/// 等待应答：`status` 不是 OK 时为 `Err(Request)`；超时为 `Err(Timeout)`，槽位成为墓碑；发送端被丢弃只可能是
-/// 连接已经释放。
+/// 等待应答：`status` 不是 OK 时为 `Err(Request)`；超时为 `Err(Timeout)`，请求在等待队列里的位置保留，迟到的
+/// 应答到达时被丢弃；发送端被丢弃只可能是连接已经释放。
 pub(super) async fn await_reply(
     reply: ReplyRx,
     limit: Duration,
@@ -214,32 +216,32 @@ impl Client {
         }
     }
 
-    /// `read`，对应 C++ 的 `Read`。
+    /// `read`。
     pub fn read(&self, path: &str) -> Transaction {
         self.send(Request::new(Method::Read, path))
     }
 
-    /// `update`，`payload` 是补丁，对应 C++ 的 `Update`。
+    /// `update`，`payload` 是补丁。
     pub fn update(&self, path: &str, payload: impl Into<Value>) -> Transaction {
         self.send(Request::with_payload(Method::Update, path, payload))
     }
 
-    /// `create`，`payload` 是创建参数，对应 C++ 的 `Create`。
+    /// `create`，`payload` 是创建参数。
     pub fn create(&self, path: &str, payload: impl Into<Value>) -> Transaction {
         self.send(Request::with_payload(Method::Create, path, payload))
     }
 
-    /// `delete`，对应 C++ 的 `Delete`。
+    /// `delete`。
     pub fn delete(&self, path: &str) -> Transaction {
         self.send(Request::new(Method::Delete, path))
     }
 
-    /// `call`，`payload` 是命令或动作的参数，对应 C++ 的 `Call`。
+    /// `call`，`payload` 是命令或动作的参数。
     pub fn call(&self, path: &str, payload: impl Into<Value>) -> Transaction {
         self.send(Request::with_payload(Method::Call, path, payload))
     }
 
-    /// 写出 `request` 并丢弃应答（槽位成为墓碑），退订用。
+    /// 写出 `request`，不等应答（迟到的应答到达时被丢弃），退订用。
     pub(super) async fn fire(&self, request: &Request) -> Result<()> {
         let frame = encode(request)?;
         let mut writer = self.shared.writer.lock().await;
@@ -254,8 +256,7 @@ impl Client {
         self.shared.addr
     }
 
-    /// 至今经这条连接发出的 `create`、`update`、`delete`、`call` 数（含文件传输），供资源层判断缓存是否过期，取代
-    /// C++ 的 `SetNonIdempotentRequestHandler`（回调捕获裸指针、只有一个槽位）。
+    /// 至今经这条连接发出的 `create`、`update`、`delete`、`call` 数（含文件传输），供资源层判断缓存是否过期。
     ///
     /// 主连接的请求在写锁内计数：先读计数、再发出读请求，若读到的计数之后又有变更请求，下一次比较就会发现；
     /// 计数没变时，所有已计数的变更都排在这次读取之前，服务端按顺序执行。文件传输在另一条连接上，完成后才计数。
@@ -263,8 +264,7 @@ impl Client {
         self.shared.writes.load(Ordering::Relaxed)
     }
 
-    /// 连接是否仍然可用；拆连接之后为 `false`，对应 C++ 的 `IsConnected`。断开的原因由之后的任一请求、订阅或流
-    /// 以 `Disconnected` 给出（C++ 的 `SetDisconnectHandler`）。
+    /// 连接是否仍然可用；断开之后为 `false`。断开的原因由之后的任一请求、订阅或流以 `Disconnected` 给出。
     pub fn is_connected(&self) -> bool {
         self.shared.link.reason().is_none()
     }
@@ -279,8 +279,7 @@ impl fmt::Debug for Client {
     }
 }
 
-/// 一个待发送的请求及其超时，对应 C++ 的 `GoTransaction`：[`response`](Self::response) 写出请求并等待应答，
-/// 丢弃则什么也不发。
+/// 一个待发送的请求及其超时：[`response`](Self::response) 写出请求并等待应答，丢弃则什么也不发。
 #[must_use = "the request is only sent when response() is awaited"]
 #[derive(Debug)]
 pub struct Transaction {
@@ -295,11 +294,11 @@ impl Transaction {
         Self { timeout, ..self }
     }
 
-    /// 写出请求并等待应答，对应 C++ 的 `GetResponse` / `CheckResponse`。超时只覆盖等待应答，从写出之后开始计。
+    /// 写出请求并等待应答。超时只覆盖等待应答，从写出之后开始计。
     ///
-    /// `status` 不是 OK 时返回 `Err(Request)`；超时返回 `Err(Timeout)`，槽位成为墓碑，连接照常可用。`stream` 与
-    /// `cancelStream` 报 `InvalidArgument`：流在自己的连接上（[`Client::open_stream`]），主连接上流的结束与
-    /// `cancelStream` 竞争会产生孤立响应，使 FIFO 错位。
+    /// `status` 不是 OK 时返回 `Err(Request)`；超时返回 `Err(Timeout)`，迟到的应答被丢弃，连接照常可用。`stream`
+    /// 与 `cancelStream` 报 `InvalidArgument`：流用 [`Client::open_stream`] 在自己的连接上开，原因见
+    /// [`StreamHandle`](crate::control::StreamHandle)。
     pub async fn response(self) -> Result<Response> {
         let Self {
             client,

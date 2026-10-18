@@ -1,12 +1,9 @@
-//! 用升级包升级设备，对应 C++ 示例 `SystemUpgrade`。
+//! 用升级包升级设备。
 //!
-//! 用法：`cargo run --example system_upgrade -- <升级包>`。设备必须是传感器或 GoMax，不能是 PC；被远程控制的传感器要
-//! 连接控制方（`GOPXL_IP=127.0.0.1`）。先订阅 `/system` 再发出升级命令，每条 `/system` 通知之后
-//! 读取升级状态与进度，直到完成或失败。
-//!
-//! 与 C++ 的差异：升级包经文件传输连接发送（`Client::transfer`，协议假设 T1、T2），不占用主连接；包路径取自第一个
-//! 命令行参数（C++ 写死 `./upgrade_archive.dat`），读不到时报错（C++ 发送空包）；默认地址同其他示例（C++ 此处为
-//! 127.0.0.1）；升级失败时以错误退出（C++ 仍返回成功）；完成或失败后先退订（`unSub`）再断开（C++ 直接断开）。
+//! 用法：`cargo run --example system_upgrade -- <升级包>`，按回车后开始。设备必须是传感器或 GoMax，不能是 PC；
+//! Accelerated 传感器要连接控制方（见 `common` 的模块文档）。升级包经文件传输连接发送（见 `src/docs/assumptions.rs`
+//! 的 T1、T2）。先订阅 `/system` 再发出升级命令，每条 `/system` 通知之后读取升级状态与进度，直到完成或失败；失败时
+//! 以错误退出，结束后先退订再断开。
 
 mod common;
 
@@ -19,12 +16,12 @@ const UPGRADE_COMMAND: &str = "/system/commands/upgrade";
 /// 升级状态（`upgradeState`、`upgradePercentComplete`）所在的资源，也是订阅的表达式。
 const UPGRADE_STATUS_PATH: &str = "/system";
 
-/// 升级命令的超时：文件传输连接上连续没有收到数据的时长。
+/// 升级命令的超时：文件传输连接上连续无数据的时长。
 const UPGRADE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// 等待升级完成的时长。
 const UPGRADE_COMPLETE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// `upgradeState`：失败。手册的说明文字与取值错位，取值以 C++ 的 `UpgradeState` 为准。
+/// `upgradeState`：失败。
 const UPGRADE_FAILED: i64 = -1;
 /// `upgradeState`：完成，也是启动后的默认值。
 const UPGRADE_COMPLETED: i64 = 0;
@@ -65,7 +62,7 @@ async fn main() -> common::Result {
             .recv_timeout(remaining)
             .await?
             .ok_or("the upgrade did not complete within 5 minutes")?;
-        // Lagged 时丢掉的可能正是 /system 的通知，同样重读状态。
+        // `Notice::Lagged` 表示通知队列满时丢掉了若干条，丢掉的可能正是 /system 的通知，同样重读状态。
         if matches!(&notice, Notice::Event(n) if n.path != UPGRADE_STATUS_PATH) {
             continue;
         }
@@ -76,7 +73,7 @@ async fn main() -> common::Result {
             }
             Ok(UPGRADE_FAILED) => break Err("System upgrade failed.".into()),
             Ok(_) => {}
-            // 与 C++ 的通知回调一样，一次读取出错只打印，继续等待下一条通知。
+            // 演示用途，一次读取出错只打印，继续等待下一条通知。
             Err(e) => eprintln!("{e} - Notification handler error."),
         }
     };

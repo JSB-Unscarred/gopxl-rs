@@ -1,14 +1,8 @@
 //! 用资源层读取 schema：打印 `/system` 的顶层属性、`runState` 与传感器、扫描器几个参数的 schema 节点，在客户端按
-//! schema 校验曝光值，再开启写入前的校验修改曝光模式，对应 C++ 示例 `ResourceSchema`。
+//! schema 校验曝光值，再开启写入前的校验修改曝光模式。
 //!
-//! 会把传感器的曝光模式设为单次（0）。
-//!
-//! 与 C++ 的差异：`SchemaFor` 写作 `schema::schema_for_path(resource.schema().await?, ..)`，路径不在 schema 中时同样报错
-//! 退出；`System::resource` 总是开启校验，取代 `GoResourceManager` 的 `AutoValidation`，省去打印它的一行，小节标题
-//! 与捕获信息不再提 C++ 的类型名，扫描器的两步共用一个 `Resource`（C++ 的管理器对同一路径返回同一对象）；写入 99
-//! 校验失败时先重读一次 schema 再报错（schema 随设备状态变化，C++ 直接按缓存的 schema 报错）；问题与错误消息的
-//! 文本取自 `schema::validate` 与 `Error::Validation`，措辞与 C++ 不同；三次 `validate` 都打印问题（C++ 第一次不打印）；
-//! 顶层属性的 `type` 不是字符串（可空类型写作数组）时打印其 JSON 文本（C++ 的 `Get<string>` 抛异常退出）。
+//! 会把传感器的曝光模式设为单次（0）。路径不在 schema 中、或 schema 节点缺少 `type` 时报错退出；顶层属性的 `type`
+//! 不是字符串（可空类型写作数组）时打印其 JSON 文本。
 
 mod common;
 
@@ -73,18 +67,18 @@ async fn main() -> common::Result {
     sensor.set_validation(true);
     println!("Validation enabled: {}", sensor.validation_enabled());
 
-    // 与 C++ 相同，只捕获校验错误；服务端拒绝等其他错误中止示例。
+    // 只捕获校验错误；服务端拒绝等其他错误中止示例。
     match sensor.set(EXPOSURE_MODE_PATH, 0).await {
-        Ok(()) => println!("SetInt(exposureMode, 0): OK"),
+        Ok(()) => println!("set(exposureMode, 0): OK"),
         Err(e @ Error::Validation { .. }) => eprintln!("Unexpected validation error: {e}"),
         Err(e) => return Err(e.into()),
     }
 
     // 99 不在曝光模式的 enum 中，校验失败，请求不发出。
     match sensor.set(EXPOSURE_MODE_PATH, 99).await {
-        Ok(()) => println!("SetInt(exposureMode, 99): OK (unexpected)"),
+        Ok(()) => println!("set(exposureMode, 99): OK (unexpected)"),
         Err(ref e @ Error::Validation { ref issues, .. }) => {
-            println!("SetInt(exposureMode, 99): Caught validation error");
+            println!("set(exposureMode, 99): Caught validation error");
             println!("  Message: {e}");
             for issue in issues {
                 println!("  Detail: {issue}");
@@ -109,16 +103,14 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// `resource` 的 schema 中 `pointer` 处的节点，对应 C++ 的 `SchemaFor`；不在 schema 中时报错（C++ 抛
-/// `GoResourceError`）。
+/// `resource` 的 schema 中 `pointer` 处的节点；不在 schema 中时报错。
 async fn schema_for<'a>(resource: &'a mut Resource, pointer: &str) -> common::Result<&'a Value> {
     let path = resource.path().to_owned();
     let node = schema::schema_for_path(resource.schema().await?, pointer);
     node.ok_or_else(|| format!("{pointer} is not in the schema of {path}").into())
 }
 
-/// 打印 schema 节点的类型与存在的约束、注解，对应 C++ 示例的 `PrintSchema`；缺少 `type` 时报错（C++ 的 `At`
-/// 抛异常）。
+/// 打印 schema 节点的类型与存在的约束、注解；缺少 `type` 时报错。
 fn print_schema(label: &str, schema: &Value) -> common::Result {
     println!("{label}:");
     let ty = schema

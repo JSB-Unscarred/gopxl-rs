@@ -1,4 +1,4 @@
-//! Gocator 6.x 经典发现协议（UDP 3220），对应 C++ 的 `ClassicDiscoveryProto`，用来找到 GoPxL 之前的 Gocator 设备。
+//! Gocator 6.x 经典发现协议（UDP 3220），用来找到 GoPxL 之前的 Gocator 设备。
 //!
 //! 流程：广播 `GetIP`（[`encode_get_ip`]），每台设备回复地址；对每个新序列号广播 `GetInfo`（[`encode_get_info`]），
 //! 设备回复版本与端口。整数都是小端，命令与回复的头部顺序不同：
@@ -10,9 +10,8 @@
 //! | 16 | `i64` 签名 `"LMIUDP\0\0"` | `i64` 状态，1 为成功 |
 //! | 24 | `i64` 序列号（`GetIP` 为 0） | `i64` 签名 |
 //!
-//! [`handle_reply`] 修掉 C++ 的两个问题：按 `MsgId` 而不是数据报长度分派（C++ 要求 `GetInfo` 回复至少 112 字节，
-//! 丢掉只含 99 字节已知字段的回复）；`app_id` 与 `serial_number` 都用截断后的 `u32` 序列号。读取方式与
-//! 父模块相同：Length 字段不校验，字段不全的坏报文只得到 `Err`。
+//! [`handle_reply`] 按 `MsgId` 分派，不看数据报长度：回复只要含有用到的字段即可解析。`app_id` 与 `serial_number`
+//! 都用序列号的低 32 位。读取方式与父模块相同：Length 字段不校验，字段不全的坏报文只得到 `Err`。
 
 use std::net::Ipv4Addr;
 
@@ -25,30 +24,36 @@ pub const PORT: u16 = 3220;
 
 /// 签名 `"LMIUDP\0\0"`。
 const SIGNATURE: u64 = 0x0000_5044_5549_4D4C;
+/// `GetIP` 命令的 `MsgId`。
 const GET_IP: u64 = 0x0001;
+/// `GetInfo` 命令的 `MsgId`。
 const GET_INFO: u64 = 0x0005;
+/// `GetIP` 回复的 `MsgId`。
 const GET_IP_REPLY: u64 = 0x1001;
+/// `GetInfo` 回复的 `MsgId`。
 const GET_INFO_REPLY: u64 = 0x1005;
+/// 回复中表示成功的状态。
 const OK: u64 = 1;
 
-/// `GetIP` 命令，对应 `ClassicDiscoveryProto::BroadcastGetIP`。
+/// `GetIP` 命令。
 pub fn encode_get_ip() -> [u8; 32] {
     command(GET_IP, 0)
 }
 
-/// 查询 `serial` 的 `GetInfo` 命令，对应 `ClassicDiscoveryProto::SendGetInfo`。
+/// 查询 `serial` 的 `GetInfo` 命令。
 pub fn encode_get_info(serial: u32) -> [u8; 32] {
     command(GET_INFO, serial)
 }
 
+/// 32 字节的命令：Length、`MsgId`、签名与序列号。
 fn command(msg_id: u64, serial: u32) -> [u8; 32] {
     let mut out = [0; 32];
     super::put_u64s(&mut out, &[32, msg_id, SIGNATURE, serial.into()]);
     out
 }
 
-/// 处理经典 socket 上的一个数据报；`instances` 是本次发现的结果，只查找、修改其中的经典实例（两种协议之间不去重，
-/// 与 C++ 相同）。
+/// 处理经典 socket 上的一个数据报；`instances` 是本次发现的结果，只查找、修改其中的经典实例（经典实例与 GoPxL
+/// 实例之间不去重）。
 ///
 /// - `GetIP` 回复且序列号是新的：追加经典实例（`app_id` 为 `"classic-<序列号>"`、`app_name` 为
 ///   `"Gocator Classic"`），返回 `Some(序列号)`，调用方随后广播 [`encode_get_info`]；序列号已存在时返回 `None`；
@@ -78,7 +83,7 @@ fn get_ip_reply(
     mut buf: &[u8],
     instances: &mut Vec<Instance>,
 ) -> Result<Option<u32>, DiscoveryError> {
-    // 序列号只取低 32 位，与 C++ 的 `SerialNumber` 相同。
+    // 序列号只取 `i64` 字段的低 32 位，与 `Instance::serial_number` 的 `u32` 一致。
     let serial = buf.try_get_u32_le()?;
     skip(&mut buf, 4)?;
     if find(instances, serial).is_some() {
@@ -99,7 +104,7 @@ fn get_ip_reply(
     Ok(Some(serial))
 }
 
-/// `GetInfo` 回复头部之后的部分。字段紧密排列（C++ 用 kSerializer 逐个读取），只取序列号、版本与端口，与 C++ 相同。
+/// `GetInfo` 回复头部之后的部分。字段紧密排列，只取序列号、版本与端口。
 fn get_info_reply(mut buf: &[u8], instances: &mut [Instance]) -> Result<(), DiscoveryError> {
     skip(&mut buf, 2)?; // attr_size，含义未知
     let serial = buf.try_get_u32_le()?;

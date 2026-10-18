@@ -4,8 +4,7 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, array, optional, read_bool, read_items, read_vec, section, text, triple};
 
-/// 叠加图形（类型 70，`GoGdpRendering` / `GoGraphics`）。各计数按 `u16` 读取（C++ 用 `k16s`，≥ 32768 时跳过循环
-/// 并错位）。
+/// 叠加图形（类型 70）。各图元的个数按无符号 `u16` 读取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rendering {
     /// 点集。
@@ -24,7 +23,7 @@ pub struct Rendering {
     pub positions: Vec<Position>,
 }
 
-/// 点集（`GoPointSet`）。
+/// 点集。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointSet {
     /// 点的大小。
@@ -37,7 +36,7 @@ pub struct PointSet {
     pub points: Vec<[f32; 3]>,
 }
 
-/// 线集（`GoLineSet`）。
+/// 线集。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LineSet {
     /// 线宽。
@@ -52,10 +51,10 @@ pub struct LineSet {
     pub points: Vec<[f32; 3]>,
 }
 
-/// 区域（`GoRegion`）。类型字节在区域的段之前、段外。
+/// 区域。类型字节在区域的段之前、段外。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Region {
-    /// 类型 0（`GoProfileRegion2d`）。
+    /// 类型 0：轮廓的 2D 区域。
     Profile2d {
         /// x。
         x: f64,
@@ -68,7 +67,7 @@ pub enum Region {
         /// 绕 Y 轴的角度。
         angle_y: f64,
     },
-    /// 类型 1（`GoRegion3d`）。
+    /// 类型 1：3D 区域。
     Region3d {
         /// x。
         x: f64,
@@ -85,7 +84,7 @@ pub enum Region {
         /// 绕 Z 轴的角度。
         angle_z: f64,
     },
-    /// 类型 2（`GoSurfaceRegion2d`，SDK 预留）。
+    /// 类型 2：表面的 2D 区域（预留）。
     Surface2d {
         /// x。
         x: f64,
@@ -98,11 +97,11 @@ pub enum Region {
         /// 绕 Z 轴的角度。
         angle_z: f64,
     },
-    /// 未知的区域类型，段被整体跳过（C++ 不消耗段而错位，.NET 抛异常）。
+    /// 未知的区域类型，段被整体跳过，后面的图元照常读取。
     Unknown(u8),
 }
 
-/// 平面（`GoPlane`）。
+/// 平面。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plane {
     /// 到原点的距离。
@@ -111,7 +110,7 @@ pub struct Plane {
     pub normal: [f32; 3],
 }
 
-/// 射线（`GoRay`）。
+/// 射线。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ray {
     /// 起点 x、y、z。
@@ -124,21 +123,21 @@ pub struct Ray {
     pub color: u32,
 }
 
-/// 标签（`GoLabel`）。
+/// 标签。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
-    /// 文本，保留内嵌 NUL（C++ 在 NUL 处截断）。
+    /// 文本，保留内嵌 NUL。
     pub text: String,
     /// 位置 x、y、z。
     pub position: [f64; 3],
     /// 对齐（1.5 新增）：0 居中，1 / 2 中左 / 中右，4 / 5 / 6 中上 / 左上 / 右上，8 / 9 / 10 中下 / 左下 / 右下。
-    /// 段内剩余 ≥ 8 字节才与 `color` 一起读取（C++ 不读取，协议假设 G1）。
+    /// 与 `color` 是一组可选尾部字段，见 [协议假设 G1](crate::docs::assumptions)。
     pub alignment: Option<i32>,
     /// 颜色 0xAARRGGBB（1.5 新增），与 `alignment` 同时出现。
     pub color: Option<u32>,
 }
 
-/// 位置标记（`GoPosition`）。
+/// 位置标记。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Position {
     /// 位置 x、y、z。
@@ -148,7 +147,7 @@ pub struct Position {
 }
 
 impl Rendering {
-    /// 读取计数段与各图元。计数段是独立的切片，按图元的顺序从中依次取出计数。
+    /// 读取属性段与各图元。属性段是独立的切片，按图元的顺序从中依次取出个数。
     pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let counts = &mut section(buf, 2)?;
         let mut count = || counts.try_get_u16_le().map(u32::from);

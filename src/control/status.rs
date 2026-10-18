@@ -79,7 +79,7 @@ impl Status {
         OVERHEAT = -975 => "overheat",
     }
 
-    /// 是否成功（`== OK`）。与 SDK 的 `!= kOK` 判断一致：0 与其他值都是失败。
+    /// 是否成功（`== OK`）：0 与其他值都是失败。
     pub fn is_ok(self) -> bool {
         self == Self::OK
     }

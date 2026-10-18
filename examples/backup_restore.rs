@@ -1,10 +1,7 @@
-//! 系统的备份与恢复，对应 C++ 示例 `BackupRestore`。
+//! 系统的备份与恢复。
 //!
-//! 把全局设置、全部工作区与作业、回放数据和当前作业归档到 `sample_backup.gpbak`，再用这个文件恢复系统；恢复覆盖
-//! 设备上的这些内容。
-//!
-//! 与 C++ 的差异：归档与恢复走文件传输连接（`Client::transfer`）；恢复的超时从 3 s 改为 30 s
-//! （`common::EXTENDED_TIMEOUT`，C++ 注明它用于 backup / restore）。
+//! 把全局设置、全部工作区与作业、回放数据和当前作业归档到当前目录的 `sample_backup.gpbak`，再用这个文件恢复系统；
+//! 恢复覆盖设备上的这些内容。收发方式见 `common::download_archive` 与 `common::restore_archive`。
 
 mod common;
 

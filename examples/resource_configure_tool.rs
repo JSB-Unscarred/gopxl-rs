@@ -1,12 +1,8 @@
 //! 用资源 API 添加并配置测量工具：创建 Profile Bounding Box、改 extId、开启并修改区域、列出数据源与工具输入、连接
-//! 输入、开启测量输出并读取测量值，最后开启 GDP 输出并加入测量值，对应 C++ 示例 `ResourceConfigureTool`。
+//! 输入、开启测量输出并读取测量值，最后开启 GDP 输出并把测量值加入 1 号。
 //!
 //! 设备上要有扫描数据（实时或回放）才能读到测量值；加入的输出由 `receive_measurement` 接收。每次运行都新建一个
 //! 工具，extId 要求唯一，重复运行前先在设备上删除上次的工具。
-//!
-//! 与 C++ 的差异：区域的四个参数写进一个补丁直接 `update`（C++ 经 `ScopedUpdate` 合并，线上同为一个 update）；
-//! `autoshift` 改为手册的 `autoShift`；输出的数据源 ID 用新工具路径的最后一段拼出（C++ 写死
-//! `ProfileBoundingBox-0`，设备上已有同类工具时加入的是旧工具的输出）。其余请求的顺序、参数与超时与 C++ 相同。
 
 mod common;
 
@@ -67,7 +63,7 @@ async fn main() -> common::Result {
     println!("\nEnabling measurement output at {}...", output.path());
     output.set("/enabled", true).await?;
 
-    // 给工具 1 s 处理扫描数据、算出测量值；与 C++ 相同，读不到时只提示。
+    // 给工具 1 s 处理扫描数据、算出测量值；演示用途，读不到时只提示、继续后面的步骤。
     tokio::time::sleep(Duration::from_secs(1)).await;
     let mut metrics = tool.child("metrics");
     match metrics.get::<Value>("/outputsByExtId/X/value").await {
@@ -77,7 +73,7 @@ async fn main() -> common::Result {
 
     common::enable_gdp(system.client()).await?;
 
-    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段（协议假设 R2）。
+    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段（见 `src/docs/assumptions.rs` 的 R2）。
     let tool_id = tool.path().rsplit('/').next().unwrap_or_default();
     println!("Adding measurement value to output...");
     common::add_output(system.client(), &format!("tools:{tool_id}:outputs:X"), 1).await

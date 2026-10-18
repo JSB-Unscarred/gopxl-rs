@@ -4,8 +4,7 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, read_vec, section, take};
 
-/// 轮廓属性（C++ `GoGdpProfileBase`）。毫米坐标为 `offset + scale × 原始值`，SDK 不提供换算。
-/// C++ 的 `Width`、`IntensityWidth` 即点数组与强度的长度。
+/// 轮廓属性。毫米坐标为 `offset + scale × 原始值`，由调用方换算。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProfileAttrs {
     /// X 分辨率（mm）；统一轮廓的 x 原始值是点的下标。
@@ -20,23 +19,23 @@ pub struct ProfileAttrs {
     pub exposure: f32,
 }
 
-/// 统一轮廓（类型 12，`GoGdpProfileUniform`）。
+/// 统一轮廓（类型 12）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniformProfile {
     /// 属性。
     pub attrs: ProfileAttrs,
-    /// W 个 z 原始值；`i16::MIN`（`k16S_NULL`）表示无效。
+    /// W 个 z 原始值；`i16::MIN` 表示无效。
     pub ranges: Vec<i16>,
     /// iW 字节强度，帧的零拷贝切片；不带强度时为空。
     pub intensity: Bytes,
 }
 
-/// 轮廓点云（类型 13，`GoGdpProfilePointCloud`）。
+/// 轮廓点云（类型 13）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfilePointCloud {
     /// 属性。
     pub attrs: ProfileAttrs,
-    /// W 个 `(x, z)` 原始值；x 为 `i16::MIN` 表示无效（与 SDK 示例相同）。
+    /// W 个 `(x, z)` 原始值；x 为 `i16::MIN` 表示无效。
     pub points: Vec<[i16; 2]>,
     /// iW 字节强度，帧的零拷贝切片；不带强度时为空。
     pub intensity: Bytes,
@@ -60,7 +59,7 @@ impl ProfileAttrs {
 }
 
 impl UniformProfile {
-    /// 读取属性段与段外的数据。数据不足报 `Truncated`（C++ 的 `kERROR_INCOMPLETE`）。
+    /// 读取属性段与段外的数据。数据不足报 `Truncated`。
     pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let (attrs, width, intensity_width) = ProfileAttrs::decode(buf)?;
         Ok(Self {

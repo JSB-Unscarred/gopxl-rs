@@ -7,8 +7,7 @@
 //!   路径的每一级祖先（根除外）；转义与通配同 R，但 `?` 不转换，是正则量词。另外，`/` 上的 `embeddedUpdated`
 //!   投给每个订阅。
 //!
-//! C++ SDK 在本地按精确路径、前缀与祖先回溯分派，与服务端的投递不一致；这里逐字移植
-//! 服务端的变换，再用 regex-lite 编译。
+//! 本地逐字移植服务端的变换，再用 regex-lite 编译，订阅收到的通知因此与服务端投递的一致。
 
 use std::borrow::Cow;
 
@@ -33,11 +32,10 @@ impl SubscriptionExpr {
     /// 编译表达式。
     ///
     /// 含 `| ( ) [ ] { } ^ \` 时报错：服务端把它们原样交给 ECMAScript 正则，而 regex-lite 在字符类、反向引用、
-    /// 断言等语法上与之不同（GoPxL PC 版的 MSVC `std::regex` 还会对单独的 `]`、`}` 抛异常）。不含它们时两边只用到
-    /// 字面字符、`.`、`.*`、分组与 `?` 量词；`(?R)` 让 `.` 与 ECMAScript 一样不匹配 `\r`、`\n`，再按字节匹配，结果
-    /// 与服务端相同。含 NUL（服务端以 C 字符串读取表达式，在 NUL 处截断）、生成的正则无法编译（例如 `?`）或超过
-    /// regex-lite 的嵌套上限（约 16 级 `/`，已知的资源路径不超过 10 级）时同样报错。叠加的量词（`/a???`）与传感器的
-    /// libstdc++ 一样接受，PC 版的 MSVC 会拒绝。
+    /// 断言等语法上与之不同，本地无法保证匹配一致。不含它们时两边只用到字面字符、`.`、`.*`、分组与 `?` 量词；
+    /// `(?R)` 让 `.` 与 ECMAScript 一样不匹配 `\r`、`\n`，再按字节匹配，结果与服务端相同。含 NUL（服务端在 NUL
+    /// 处截断表达式）、生成的正则无法编译（例如 `?`）或超过 regex-lite 的嵌套上限（约 16 级 `/`，已知的资源路径
+    /// 不超过 10 级）时同样报错。叠加的量词（`/a???`）照常编译，部分服务端平台会拒绝这种表达式。
     pub fn new(text: &str) -> Result<Self, SubExprError> {
         let error = || SubExprError(text.to_owned());
         if text.contains(['|', '(', ')', '[', ']', '{', '}', '^', '\\', '\0']) {
@@ -58,7 +56,8 @@ impl SubscriptionExpr {
         &self.text
     }
 
-    /// 服务端是否会因为这个订阅投递该事件（`AsyncChannel::IsSubscribed`；服务端只按这一规则投递是协议假设 S2）。
+    /// 服务端是否会因为这个订阅投递该事件（`AsyncChannel::IsSubscribed`；服务端只按这一规则投递是
+    /// [协议假设 S2](crate::docs::assumptions)）。
     pub fn delivers(&self, event: &EventType, path: &str) -> bool {
         let bytes = bytes(path);
         match event {
@@ -68,7 +67,7 @@ impl SubscriptionExpr {
     }
 }
 
-/// 服务端的 `std::regex` 在 `std::string` 上按字节匹配：R 的 `.` 只吃一个字节，E 的 `?` 只作用于前一个字节。
+/// 服务端按字节匹配：R 的 `.` 只吃一个字节，E 的 `?` 只作用于前一个字节。
 /// 把每个字节映射为 U+0000..=U+00FF（regex-lite 不把其中的非 ASCII 字符当作元字符），这里的匹配就同样按字节；
 /// 纯 ASCII 时直接借用，不分配。
 fn bytes(text: &str) -> Cow<'_, str> {

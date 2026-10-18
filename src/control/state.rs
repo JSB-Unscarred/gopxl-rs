@@ -1,4 +1,4 @@
-//! 主连接的协议状态机 [`ControlCore`]（纯逻辑，不做 I/O、不起任务）：按 FIFO 把响应交给请求。连接层在锁外用
+//! 主连接的协议状态机 [`ControlCore`]（纯逻辑，不做 I/O、不起任务）：按发送顺序把响应交给请求。连接层在锁外用
 //! [`Inbound::decode`] 解码每一帧（坏帧即 [`DisconnectReason::Decode`]），再交给它投递。
 
 use std::collections::VecDeque;
@@ -9,20 +9,20 @@ use tokio::sync::oneshot;
 use super::{Inbound, Notification, Response};
 use crate::error::DisconnectReason;
 
-/// 一个请求的结果：响应，或拆连接的原因。
+/// 一个请求的结果：响应，或断开连接的原因。
 pub(super) type Reply = Result<Response, Arc<DisconnectReason>>;
 
 /// 一个请求的应答接收端，由 [`ControlCore::register`] 返回。
 ///
-/// 调用方超时即丢弃它：槽位成为墓碑，照样占住 FIFO 中的位置吸收迟到的响应，后面的请求仍拿到自己的响应。
+/// 调用方超时即丢弃它：请求在等待队列里的位置保留，迟到的响应到达时被丢弃，后面的请求仍拿到自己的响应。
 pub(super) type ReplyRx = oneshot::Receiver<Reply>;
 
-/// 主连接的 FIFO 对应器，取代 C++ `GoRestClient` 的事务队列。
+/// 主连接的等待队列：按发送顺序保存挂起请求的应答通道，第 n 个响应交给第 n 个请求。
 ///
 /// 线上不带请求 id：服务端每条连接一个 worker，按到达顺序处理请求，所以第 n 个响应属于第 n 个请求。调用方在写锁内、
-/// 帧的第一个字节写出之前 [`register`](Self::register)，槽位顺序因此等于线上顺序（C++ SDK 先入队后发送，发送失败
-/// 留下孤儿事务）。流结束与 `cancelStream` 竞争产生的孤立响应会让 FIFO 错位，所以流与文件传输各用自己的连接，
-/// 主连接上没有它们；挂起队列为空时到达的响应不属于任何请求，与 C++ 一样丢弃。
+/// 帧的第一个字节写出之前 [`register`](Self::register)，队列顺序因此等于线上顺序。流与文件传输各用自己的连接，
+/// 主连接上只有一问一答的请求（流的原因见 [`StreamHandle`](super::StreamHandle)）；队列为空时到达的响应不属于任何
+/// 请求，丢弃。
 #[derive(Debug, Default)]
 pub(super) struct ControlCore {
     pending: VecDeque<oneshot::Sender<Reply>>,
@@ -31,7 +31,7 @@ pub(super) struct ControlCore {
 impl ControlCore {
     /// 登记即将写出的请求并返回它的应答接收端；必须在它的第一个字节写出之前调用。
     ///
-    /// 通道在这里建立：每个槽位只发送一次（应答或 `fail_all`），`oneshot` 的 `send` 从不等待。
+    /// 通道在这里建立：每个请求只收到一次结果（应答或 `fail_all`），`oneshot` 的 `send` 从不等待。
     pub(super) fn register(&mut self) -> ReplyRx {
         let (tx, rx) = oneshot::channel();
         self.pending.push_back(tx);
@@ -43,7 +43,7 @@ impl ControlCore {
         match inbound {
             Inbound::Response(response) => {
                 if let Some(tx) = self.pending.pop_front() {
-                    // 发送失败即墓碑：调用方已超时，响应被丢弃。
+                    // 发送失败说明调用方已超时，响应丢弃。
                     let _ = tx.send(Ok(response));
                 }
                 None
@@ -53,7 +53,7 @@ impl ControlCore {
         }
     }
 
-    /// 拆连接时让所有挂起的请求以同一个原因失败，清空队列。
+    /// 断开连接时让所有挂起的请求以同一个原因失败，清空队列。
     pub(super) fn fail_all(&mut self, reason: &Arc<DisconnectReason>) {
         for tx in self.pending.drain(..) {
             let _ = tx.send(Err(Arc::clone(reason)));
@@ -61,7 +61,7 @@ impl ControlCore {
     }
 }
 
-// ControlCore 是自有设计，无法与官方实现对照，出错时响应会静默交给错误的调用方。
+// 请求与响应的配对出错时，响应会静默交给错误的调用方。
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -86,8 +86,8 @@ mod tests {
         Inbound::decode(Bytes::from(frame)).unwrap()
     }
 
-    // FIFO 与墓碑：超时的请求丢弃接收端后，槽位仍吸收它的迟到响应，下一个请求拿到自己的响应；通知、流消息与未知
-    // type 不占槽位；挂起队列为空时的响应丢弃。
+    // 按顺序配对：超时的请求丢弃接收端后，它的位置仍接住迟到的响应，下一个请求拿到自己的响应；通知、流消息与未知
+    // type 不占位置；队列为空时的响应丢弃。
     #[test]
     fn tombstone_absorbs_late_response() {
         let mut core = ControlCore::default();
@@ -113,7 +113,7 @@ mod tests {
         assert!(core.on_inbound(stray).is_none());
     }
 
-    // 拆连接：fail_all 让每个挂起的请求恰好以同一个原因失败一次，并清空队列。
+    // 断开连接：fail_all 让每个挂起的请求恰好以同一个原因失败一次，并清空队列。
     #[test]
     fn fail_all_completes_every_slot_once() {
         let mut core = ControlCore::default();

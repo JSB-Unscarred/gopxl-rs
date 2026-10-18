@@ -1,9 +1,8 @@
-//! 示例共用的部分，对应 C++ 示例的 `SampleUtils`：设备地址、路径与超时常量、连接检查、GDP 输出的设置、数据集的
-//! 打印与 BMP 写出。
+//! 示例共用的部分：设备地址、路径与超时常量、连接检查、GDP 输出的设置、数据集的打印与 BMP 写出。
 //!
-//! 每个示例以 `mod common;` 引入；设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），未设置时先发现
-//! （C++ 示例写死 `SYSTEM_IP` 为 `192.168.1.10`）。被远程控制（加速）的传感器要连接控制方，通常是 `127.0.0.1`。
-//! 换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 常量与写死了引擎 ID 的各个路径常量，示例的其他
+//! 每个示例以 `mod common;` 引入；设备地址取自环境变量 `GOPXL_IP`（`IP` 或 `IP:端口`），未设置时先发现。
+//! Accelerated 传感器由另一台 PC 上的 GoPxL 控制，这时要连接控制方的地址（示例在控制方 PC 上运行时通常是
+//! `127.0.0.1`）。换引擎（例如共焦线的 `LMIConfocalLineProfiler`）时改这里的 ID 常量与写死了引擎 ID 的各个路径常量，示例的其他
 //! 路径与数据源都由这些常量拼出。
 
 #![allow(dead_code, reason = "每个示例只用到其中一部分")]
@@ -17,10 +16,10 @@ use gopxl::discovery::{self, Instance};
 use gopxl::gdp::{self, Body, Cas, Image, Message, PixelFormat, ProfileAttrs};
 use gopxl::{RunState, System, Value, control};
 
-/// 示例的结果类型：`main` 返回 `Err` 时打印错误并以失败退出，取代 C++ 示例逐段的 `try` / `catch`。
+/// 示例的结果类型：`main` 返回 `Err` 时打印错误并以失败退出。
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// 引擎 ID（C++ 示例以 `GOCATOR_SENSOR` 选择的激光线轮廓引擎）。
+/// 引擎 ID：激光线轮廓引擎。
 pub const ENGINE_ID: &str = "LMILaserLineProfiler";
 /// 扫描器（传感器组）ID。
 pub const SCANNER_ID: &str = "scanner-0";
@@ -90,14 +89,13 @@ pub const RECEIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// 图像的默认输出位置。
 pub const IMAGE_FILE: &str = "ImageOutput.bmp";
 
-/// 无效的轮廓与表面点（`k16S_NULL`）。
+/// 无效的轮廓与表面点。
 pub const NULL: i16 = i16::MIN;
 
 /// 发现的等待时长。
 pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 连接 `GOPXL_IP`，对应 C++ 示例开头的 `SetAddress`、`SetControlPort` 与 `Connect`；未设置时用
-/// [`discover_one`] 找到的实例。
+/// 连接 `GOPXL_IP`；未设置时用 [`discover_one`] 找到的实例。
 pub async fn connect() -> Result<System> {
     let addr = match std::env::var("GOPXL_IP") {
         Ok(text) => match text.parse() {
@@ -110,8 +108,8 @@ pub async fn connect() -> Result<System> {
     Ok(System::connect(addr).await?)
 }
 
-/// 发现唯一一台可连接（未被远程控制）的 GoPxL 实例，返回它的控制通道地址。没有或有多台时返回错误，由
-/// `GOPXL_IP` 指定，避免连到别的设备上改配置。
+/// 发现唯一一台可连接的 GoPxL 实例（由另一台 PC 控制的除外），返回它的控制通道地址。找到零台或多台时返回错误，
+/// 要求用 `GOPXL_IP` 指定，避免连到别的设备上改配置。
 async fn discover_one() -> Result<SocketAddr> {
     println!("GOPXL_IP is not set, discovering...");
     let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT)
@@ -126,8 +124,7 @@ async fn discover_one() -> Result<SocketAddr> {
     }
 }
 
-/// 打印 API 版本与设备信息，确认设备没有被远程控制；对应 C++ 的 `VerifyConnection`。被远程控制时返回错误：
-/// 这时要连接控制方的地址。
+/// 打印 API 版本与设备信息。设备由另一台 PC 上的 GoPxL 控制时返回错误，错误信息给出控制方的地址，要改连控制方。
 pub async fn verify_connection(system: &System) -> Result {
     let client = system.client();
     let version = client.read("/version").response().await?.payload;
@@ -170,14 +167,14 @@ pub async fn verify_connection(system: &System) -> Result {
     Ok(())
 }
 
-/// 字符串原样输出（C++ 的 `Get<string>()`），其他值输出 JSON 文本。
+/// 字符串原样输出，其他值输出 JSON 文本。
 pub fn text(value: &Value) -> String {
     value
         .as_str()
         .map_or_else(|| value.to_string(), str::to_owned)
 }
 
-/// 打印小节标题，对应 C++ 的 `PrintSectionHeader`。
+/// 打印小节标题。
 pub fn section(title: &str) {
     let rule = "=".repeat(81);
     println!("\n{rule}\n{title}\n{rule}\n");
@@ -203,7 +200,7 @@ pub fn scan_source(key: &str) -> String {
     format!("scan:{ENGINE_ID}:{SCANNER_ID}:{key}")
 }
 
-/// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错（C++ 的 `At` 抛异常）。
+/// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错。
 pub async fn read_at(client: &Client, path: &str, pointer: &str) -> Result<Value> {
     let payload = client.read(path).response().await?.payload;
     let value = payload
@@ -248,7 +245,7 @@ pub async fn enable_intensity(client: &Client) -> Result {
     Ok(())
 }
 
-/// 就绪时启动设备（C++ 示例的 `if (RunningState() == Ready) Start()`）。
+/// 设备处于 `Ready` 时启动它，其他状态（例如已在运行）不动。
 pub async fn start_if_ready(system: &System) -> Result {
     if system.running_state().await? == RunState::Ready {
         println!("Starting system...");
@@ -280,8 +277,7 @@ pub async fn add_output(client: &Client, source: &str, output_id: i64) -> Result
     Ok(())
 }
 
-/// `source` 不在 GDP 输出表中时把它加到 0 号。按 `source` 精确匹配：C++ 把 `source.find(key)` 的返回值当作真值，
-/// 输出表非空即跳过添加。
+/// `source` 不在 GDP 输出表中时把它加到 0 号。按 `source` 精确匹配，输出表里有其他数据源时照样添加。
 pub async fn ensure_output(client: &Client, source: &str) -> Result {
     let outputs = client
         .read("/controls/gocator/outputs")
@@ -299,15 +295,14 @@ pub async fn ensure_output(client: &Client, source: &str) -> Result {
     Ok(())
 }
 
-/// 连接 GDP 服务端（[`System::gdp`]），打印进度；对应 C++ 示例的
-/// `gdpClient->Connect(system.Address(), system.GdpPort())`。
+/// 连接 GDP 服务端（[`System::gdp`]），打印进度。
 pub async fn connect_gdp(system: &System) -> Result<gdp::Client> {
     println!("Connecting to Gocator Protocol...");
     Ok(system.gdp().await?)
 }
 
-/// 用 `call <command>` 下载归档（`contents` 选内容），写到当前目录的 `file`，返回其绝对路径；对应 C++ 示例的
-/// archive 一段。响应可能超过 1 GiB，返回前释放。
+/// 用 `call /system/commands/archive` 下载归档（`contents` 选内容），写到当前目录的 `file`，返回其绝对路径。
+/// 归档可能很大，经文件传输连接（[`Client::transfer`]）收发。
 pub async fn download_archive(client: &Client, contents: &Value, file: &str) -> Result<PathBuf> {
     let archive = Request::with_payload(Method::Call, "/system/commands/archive", contents.clone());
     let response = client.transfer(archive, RECEIVE_TIMEOUT).await?;
@@ -321,8 +316,8 @@ pub async fn download_archive(client: &Client, contents: &Value, file: &str) -> 
     Ok(path)
 }
 
-/// 把归档文件 `path` 作为 `data` 连同 `contents` 上传并恢复（`call /system/commands/restore`）；对应 C++ 示例的
-/// restore 一段。
+/// 把归档文件 `path` 作为 `data` 连同 `contents` 上传并恢复（`call /system/commands/restore`），同样经
+/// [`Client::transfer`]。
 pub async fn restore_archive(client: &Client, contents: Value, path: &Path) -> Result {
     let mut restore = Request::with_payload(Method::Call, "/system/commands/restore", contents);
     restore.payload.set("data", std::fs::read(path)?)?;
@@ -331,7 +326,7 @@ pub async fn restore_archive(client: &Client, contents: Value, path: &Path) -> R
     Ok(())
 }
 
-/// 打印标题与各资源路径（C++ 遍历 `ChildUris` 的循环）。
+/// 打印标题与各资源路径。
 pub fn print_paths(title: &str, paths: &[String]) {
     println!("\n{title}:");
     for path in paths {
@@ -339,7 +334,7 @@ pub fn print_paths(title: &str, paths: &[String]) {
     }
 }
 
-/// 打印消息类型与公共属性（C++ 各消息分支开头的几行）；数组输出的每一层是一条消息，以 `array_index` 区分。
+/// 打印消息类型与公共属性；数组输出的每一层是一条消息，以 `array_index` 区分。
 pub fn print_cas(kind: &str, cas: &Cas) {
     println!("Message type: {kind}");
     if let Some(id) = cas.gdp_id {
@@ -355,7 +350,7 @@ pub fn print_cas(kind: &str, cas: &Cas) {
     }
 }
 
-/// 轮廓的原始值换算为毫米：`偏移 + 分辨率 × 原始值`（SDK 不提供换算，示例手算）。
+/// 轮廓的原始值换算为毫米：`偏移 + 分辨率 × 原始值`。
 pub fn profile_mm(attrs: &ProfileAttrs, [x, z]: [f64; 2]) -> [f64; 2] {
     [
         attrs.x_offset + attrs.x_scale * x,
@@ -363,7 +358,7 @@ pub fn profile_mm(attrs: &ProfileAttrs, [x, z]: [f64; 2]) -> [f64; 2] {
     ]
 }
 
-/// 消息是轮廓时把它换算为毫米坐标并打印点数，返回是否为轮廓；对应 C++ 循环里轮廓的两个分支。
+/// 消息是轮廓时把它换算为毫米坐标并打印点数，返回是否为轮廓。
 pub fn print_profile(message: &Message) -> bool {
     let (kind, total, intensity, points): (_, _, _, Vec<[f64; 2]>) = match &message.body {
         Body::UniformProfile(profile) => {
@@ -426,7 +421,7 @@ pub async fn wait_for_image(gdp: &mut gdp::Client) -> Result<Vec<Message>> {
 
 /// 打印数据集中的时间戳与图像；给出 `bmp` 时把图像写成 BMP。
 pub fn print_image_set(data_set: &[Message], bmp: Option<&str>) -> Result {
-    // 超时退出时前面是没有换行的进度点。
+    // 超时退出时前面的进度点还未换行。
     println!(
         "\nTotal number of messages in this data set: {}",
         data_set.len()
@@ -461,11 +456,11 @@ pub fn print_image_set(data_set: &[Message], bmp: Option<&str>) -> Result {
     Ok(())
 }
 
-/// 把图像写成 24 位 BMP，对应 C++ 示例的 `WriteOutputToBmpFile`。支持 8 位灰度、Mono8、Mono12、Mono12p、Mono16、
-/// Rgb8、Bgr8；12 / 16 位缩放到 8 位，灰度写成三个相同的通道。
+/// 把图像写成 24 位 BMP。支持 8 位灰度、Mono8、Mono12、Mono12p、Mono16、Rgb8、Bgr8；12 / 16 位缩放到 8 位，灰度
+/// 写成三个相同的通道。
 ///
-/// 按 [`Image::row_size`] 逐行读取、每行补齐到 4 字节写出（C++ 把像素当作连续数组、不补齐，宽度不是 4 的倍数时
-/// 图像错位）。BMP 自下而上存储，行按相反顺序写出，图像不会上下颠倒。
+/// 按 [`Image::row_size`] 逐行读取、每行补齐到 4 字节写出，宽度不是 4 的倍数时图像也不错位。BMP 自下而上存储，
+/// 行按相反顺序写出，图像不会上下颠倒。
 pub fn write_bmp(path: &str, image: &Image) -> Result {
     type Pixel = fn(&[u8], usize) -> Option<[u8; 3]>;
     let pixel: Pixel = match image.pixel_format {
@@ -493,7 +488,7 @@ pub fn write_bmp(path: &str, image: &Image) -> Result {
     let stride = (width * 3).next_multiple_of(4);
     let len = 54 + stride * height;
     let mut bmp = Vec::with_capacity(len);
-    // 文件头（14 字节）与 BITMAPINFOHEADER（40 字节），分辨率 512 像素 / 米与 C++ 相同。
+    // 文件头（14 字节）与 BITMAPINFOHEADER（40 字节），分辨率填 512 像素 / 米。
     bmp.extend(b"BM");
     for field in [u32::try_from(len)?, 0, 54, 40, image.width, image.height] {
         bmp.extend(field.to_le_bytes());
@@ -526,7 +521,7 @@ fn le16(row: &[u8], x: usize) -> Option<u16> {
     ))
 }
 
-/// 把 `0..=max` 的值缩放到 8 位灰度（C++ 的 `value * 255 / max`）。
+/// 把 `0..=max` 的值缩放到 8 位灰度（`value * 255 / max`）。
 fn grey(value: u16, max: u32) -> [u8; 3] {
     [u8::try_from(u32::from(value) * 255 / max).unwrap_or(u8::MAX); 3]
 }

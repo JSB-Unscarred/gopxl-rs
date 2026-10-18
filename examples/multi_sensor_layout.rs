@@ -1,13 +1,7 @@
-//! 把第二台传感器加入传感器组，修改它在布局中的位置，再把它移除；对应 C++ 示例 `MultiSensorLayout`。
+//! 把第二台传感器加入传感器组，修改它在布局中的位置，再把它移除。
 //!
-//! 需要网络上有多台 LMI Laser Line Profiler 传感器，固件兼容且不属于其他传感器组。第二台的序列号取自环境变量
-//! `GOPXL_SERIAL2`，默认 `62984`。
-//!
-//! 与 C++ 的差异：
-//! - 第二台按序列号加入，C++ 的 `SENSOR_2_IP` 未被使用，改为可配置序列号。
-//! - 等待创建扫描器的应答：C++ 丢弃了这个事务，创建失败被忽略。
-//! - `/_embedded/go:scanner` 缺失时按无扫描器处理（C++ 的 `At` 抛异常）。
-//! - 省去对 `ENGINE_ID` 的检查：路径都由 `common` 的常量拼出。
+//! 需要网络上有多台 LMI Laser Line Profiler 传感器，固件兼容且不属于其他传感器组。第二台按序列号加入，序列号取自
+//! 环境变量 `GOPXL_SERIAL2`，默认 `62984`。引擎下扫描器为空时先创建一个。
 
 mod common;
 
@@ -22,8 +16,8 @@ async fn main() -> common::Result {
     let client = system.client();
 
     let engine = client.read(common::ENGINE_PATH).response().await?.payload;
-    // 同 GoJson::Empty（nlohmann 的 empty()）：只有 null 与空容器算空。HAL 只嵌入一项时可能是对象而不是数组
-    // （如 /controls/gocator 的 go:datasources）。
+    // `_embedded` 中只有一项时，它可能是对象而不是数组（例如 /controls/gocator 的 go:datasources）；所以缺失、
+    // 空数组与空对象都按扫描器为空处理。
     let empty = match &engine["_embedded"]["go:scanner"] {
         Value::Nil => true,
         Value::Array(items) => items.is_empty(),
@@ -69,7 +63,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 打印布局中每台传感器的位置，对应 C++ 的 `printSensorLayoutInfo`。
+/// 打印布局中每台传感器的位置。
 fn print_layout(layout: &Value) -> common::Result {
     let sensors = layout["grid"]["sensors"]
         .as_array()

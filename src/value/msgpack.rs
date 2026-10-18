@@ -1,8 +1,8 @@
 //! MessagePack 编解码：控制通道消息体（carrier 类型 0xB000）的格式。
 //!
-//! 编码与 C++ SDK（nlohmann 3.8.0 的 `to_msgpack`）逐字节一致，便于抓包比对：整数用最短格式，浮点数一律写
-//! float64（`CB`），对象的键按字节序（[`Map`] 本身有序）。解码不依赖整数宽度和键序：服务端按 C 类型选宽度
-//! （正的 k32s 也写成 `D2`，31 字节的字符串写成 `D9 1F`），键按插入顺序。
+//! 编码规则固定，同一个值总是得到同样的字节，便于抓包比对：整数用最短格式，浮点数一律写 float64（`CB`），对象的
+//! 键按字节序（[`Map`] 本身有序）。解码接受任意整数宽度和键序：服务端按字段的类型选宽度（正的 32 位有符号整数
+//! 也写成 `D2`，31 字节的字符串写成 `D9 1F`），键按插入顺序。
 //!
 //! 解码的输入来自网络，以下约定保证坏帧只会得到 `Err`：
 //! - 嵌套深度上限 [`MAX_DEPTH`]，递归不会栈溢出（栈溢出直接终止进程）；
@@ -26,8 +26,6 @@ use crate::frame::take;
 pub const MAX_DEPTH: usize = 128;
 
 /// [`encode`] 的错误：字符串、二进制、数组或对象的长度超过 `u32::MAX`，MessagePack 无法表示。
-///
-/// nlohmann 在这种情况下会写出没有长度头的坏流。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("MessagePack length exceeds u32::MAX")]
 pub struct EncodeError;
@@ -60,7 +58,7 @@ impl From<TryGetError> for DecodeError {
     }
 }
 
-/// 把 `value` 编码后追加到 `out`，对应 `GoJson::ToBinary`。出错时 `out` 末尾可能留有部分输出，应整体丢弃。
+/// 把 `value` 编码后追加到 `out`。出错时 `out` 末尾可能留有部分输出，应整体丢弃。
 pub fn encode(value: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     match value {
         Value::Nil => out.push(0xC0),
@@ -187,13 +185,13 @@ fn write_len(out: &mut Vec<u8>, family: &Family, len: usize) -> Result<(), Encod
     Ok(())
 }
 
-/// 解码一条完整的 MessagePack 文档，对应 `GoJson::ParseMsgPack`。
+/// 解码一条完整的 MessagePack 文档。
 ///
 /// - `Bin` 是 `body` 的零拷贝切片，持有它会让整个 `body` 存活；
 /// - 整数归一化（见 [`Value`]），float32 拓宽为 `f64`；
-/// - 非法 UTF-8 的字符串替换为 U+FFFD：服务端的 `std::string` 不保证 UTF-8，不应让整条消息失败；
-/// - 重复的键后者覆盖前者，与 nlohmann 相同；
-/// - ext 当作 `Bin` 并丢掉类型字节，与 nlohmann 的 `GetBinary` 看到的一致（服务端不发送 ext）。
+/// - 非法 UTF-8 的字符串替换为 U+FFFD：服务端的字符串不保证 UTF-8，不应让整条消息失败；
+/// - 重复的键后者覆盖前者；
+/// - ext 当作 `Bin` 并丢掉类型字节（服务端不发送 ext，容忍即可）。
 pub fn decode(body: &Bytes) -> Result<Value, DecodeError> {
     let mut buf = body.clone();
     let value = read_value(&mut buf, 0)?;

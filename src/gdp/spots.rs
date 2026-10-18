@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, read_bool, read_vec, section};
 
-/// 光斑（类型 17，`GoGdpSpots`），坐标是像素。
+/// 光斑（类型 17），坐标是像素。
 ///
 /// `column_based` 时 `x = slice × slice_scale + slice_offset`、`y = center × center_scale + center_offset`，
 /// 否则两轴对调；比例为负表示该轴翻转。
@@ -28,11 +28,11 @@ pub struct Spots {
     pub center_min: u32,
     /// center 原始值的上限。
     pub center_max: u32,
-    /// 光斑；C++ 的 `PointCount` 即 `spots.len()`。
+    /// 光斑。
     pub spots: Vec<Spot>,
 }
 
-/// 一个光斑（C++ `GdpSpot`）。
+/// 一个光斑。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spot {
     /// 所在的 slice（行或列）。

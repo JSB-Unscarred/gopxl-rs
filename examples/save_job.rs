@@ -1,10 +1,7 @@
-//! 作业文件的保存、改名、下载、上传与加载，对应 C++ 示例 `SaveJob`。
+//! 作业文件的保存、改名、下载、上传与加载。
 //!
-//! 会修改设备上的作业：把当前作业保存为 `SDK-demo` 并改名为 `SDK-demo-job`，下载到 `sample_job.gpjob`，再以
-//! `SDK-local-job-demo` 上传并加载。后两个名字已存在时改名或上传失败，重复运行前先在设备上删除这两个作业。
-//!
-//! 与 C++ 的差异：作业文件的下载与上传走文件传输连接（`Client::transfer`）；下载的读请求不再带上一步陈旧的
-//! `{"name": ...}` 载荷。
+//! 会修改设备上的作业：把当前作业保存为 `SDK-demo` 并改名为 `SDK-demo-job`，下载到当前目录的 `sample_job.gpjob`，
+//! 再以 `SDK-local-job-demo` 上传并加载。后两个名字已存在时改名或上传失败，重复运行前先在设备上删除这两个作业。
 
 mod common;
 
@@ -21,7 +18,7 @@ const RENAME_JOB_PATH: &str = "/jobs/commands/rename";
 /// 改名后作业的文件内容。
 const READ_DATA_PATH: &str = "/jobs/files/SDK-demo-job/data";
 const JOB_FILE: &str = "sample_job.gpjob";
-/// 上传作业的读超时，即 C++ 的 `REST_COMMAND_TIMEOUT_MSEC`。
+/// 上传作业的超时：文件传输连接上连续无数据的时长，与默认请求超时同为 3 s。
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[tokio::main]
@@ -30,7 +27,7 @@ async fn main() -> common::Result {
     common::verify_connection(&system).await?;
     let client = system.client();
 
-    // 与 C++ 相同，列表失败只报告、不中止。
+    // 演示用途，列出作业失败只报告、继续后面的步骤。
     if let Err(e) = list_jobs(client).await {
         eprintln!("Error: {e}");
     }
@@ -41,7 +38,7 @@ async fn main() -> common::Result {
 
     let rename = r#"{"sourceName":"SDK-demo","destName":"SDK-demo-job"}"#.parse::<Value>()?;
     println!("Renaming job to {}...", rename["destName"]);
-    // 与 C++ 相同，改名失败（例如目标已存在）不中止，继续下载已有的同名作业。
+    // 改名失败（例如目标已存在）只报告，继续下载已有的同名作业。
     if let Err(e) = client.call(RENAME_JOB_PATH, rename).response().await {
         eprintln!("Error: {e}");
     }

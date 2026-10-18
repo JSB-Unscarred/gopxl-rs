@@ -1,7 +1,7 @@
-//! 经 GDP 同步接收表面，对应 C++ 示例 `ReceiveSurface`：统一表面与表面点云的原始值按偏移与分辨率换算为毫米坐标。
+//! 经 GDP 同步接收表面：统一表面与表面点云的原始值按偏移与分辨率换算为毫米坐标。
 //!
-//! 实时数据时先切换到表面扫描模式，回放数据直接使用。与 C++ 的差异：按 source 精确匹配判断表面是否已在 GDP 输出中
-//! （见 `common::ensure_output`）；去掉读取扫描模式之前无意义的 `update {}`。
+//! 实时数据时先切换到表面扫描模式，回放数据直接使用。会开启强度输出，表面不在 GDP 输出中时加入
+//! （见 `common::ensure_output`），结束时停止设备。
 
 mod common;
 
@@ -38,7 +38,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 把表面换算为毫米坐标并打印，对应 C++ 循环里的 `switch`。
+/// 把表面换算为毫米坐标并打印。
 fn print_surface(message: &Message) {
     let (kind, attrs, intensity, points) = match &message.body {
         Body::UniformSurface(surface) => {

@@ -1,9 +1,7 @@
-//! 流：每个流一条自有连接，对应 C++ 的 `StartStream` / `StopStream` / `SetStreamHandler`。
+//! 流：每个流一条自有连接。
 //!
 //! [`Client::open_stream`] 对同一台设备再开一条控制连接，只写出一个 `stream` 请求；之后读任务把流消息放进有界
-//! 通道，[`StreamHandle`] Drop 即关闭连接（服务端在连接关闭时清理流），从不发 `cancelStream`。
-//! 这样主连接上没有流：流结束与 `cancelStream` 竞争产生的孤立响应、`removeStream` / `streamStart` 失败的孤立
-//! 响应都只会出现在这条连接上，应答之后的响应一律忽略；C++ 把它们当作下一个请求的应答，此后全部错位。
+//! 通道。为什么每个流一条连接见 [`StreamHandle`]。
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -22,12 +20,17 @@ use crate::net::{self, Link, MAX_FRAME};
 /// 等待 `stream` 应答的超时。
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 流消息通道的容量。消费者跟不上时读任务等待，TCP 背压传到服务端（服务端写超时 10 s 后断开连接，
-/// [`StreamHandle::recv`] 返回 `Disconnected`，协议假设 T3）；容量小，`/dataSources` 的大消息不会在本地积压。
+/// 流消息通道的容量。消费者跟不上时读任务暂停读取，服务端随之写不出（服务端写超时 10 s 后断开连接，
+/// [`StreamHandle::recv`] 返回 `Disconnected`，见[协议假设 T3](crate::docs::assumptions)）；容量小，`/dataSources`
+/// 的大消息不会在本地积压。
 const QUEUE: usize = 4;
 
-/// 一个流，拥有自己的连接与读任务；owned、`Send`，可以移到任何任务。Drop 即关闭连接（C++ 的 `StopStream`）并
-/// 中止读任务（见 `Link`）。
+/// 一个流，拥有自己的连接与读任务，可以移到任何任务。Drop 即关闭连接并中止读任务，从不发 `cancelStream`：
+/// 服务端在连接关闭时清理流。
+///
+/// 每个流一条连接，因为流的应答之后还可能出现不属于任何请求的响应：流自行结束与 `cancelStream` 同时发生时，
+/// `cancelStream` 会得到一个多余的响应；服务端的 `removeStream` / `streamStart` 失败时也会多发一个响应。在主连接
+/// 上它们会被当作下一个请求的应答，此后响应与请求全部错配；在流自己的连接上，应答之后的响应一律忽略。
 #[derive(Debug)]
 pub struct StreamHandle {
     link: Arc<Link>,
@@ -36,8 +39,8 @@ pub struct StreamHandle {
 
 impl Client {
     /// 在新连接上开始流 `path`（例如 `/system/metrics`、`/dataSources/<id>/data`），`payload` 原样放进请求
-    /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。每个流一条连接是协议
-    /// 假设 T1。
+    /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。服务端允许每个流
+    /// 一条连接是[协议假设 T1](crate::docs::assumptions)。
     pub async fn open_stream(&self, path: &str, payload: impl Into<Value>) -> Result<StreamHandle> {
         let request = Request::with_payload(Method::Stream, path, payload);
         let frame = encode(&request)?;
@@ -78,7 +81,7 @@ impl Client {
 impl StreamHandle {
     /// 取出下一条流消息，一直等待。连接断开后（已取完通道里的消息）返回 `Err(Disconnected)`。
     ///
-    /// 结束消息（`state` 为 `Complete` / `Abort`，`status` 为结束原因）照常取出，之后服务端删除流、连接保持打开：
+    /// 结束消息（`state` 为 `Complete` / `Abort`，`status` 为结束原因）照常取出，之后服务端删除流，连接仍然打开：
     /// 调用方据此停止接收并 drop 句柄。`/dataSources` 的数据可能紧跟在结束消息之后（服务端每轮先写响应队列、再写
     /// 流队列），需要时在结束消息之后再取一会儿。
     pub async fn recv(&mut self) -> Result<StreamMessage> {
@@ -118,7 +121,7 @@ impl Drop for StreamHandle {
 /// 读任务：应答交给 `reply`，流消息交给 `messages`，直到出错、EOF 或句柄被丢弃（发送失败，返回 `Closed`）。
 ///
 /// `/dataSources` 的数据走服务端的另一个队列，可能先于应答到达：先缓存，应答发出之后再按顺序放进通道，所以句柄
-/// 返回时它们排在最前面。应答之后的响应是孤立响应，与通知、未知 `type` 一起忽略。
+/// 返回时它们排在最前面。应答之后的响应不属于任何请求，与通知、未知 `type` 一起忽略。
 async fn read_stream(
     mut reader: OwnedReadHalf,
     reply: &mut Option<oneshot::Sender<Reply>>,

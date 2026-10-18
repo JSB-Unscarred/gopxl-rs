@@ -1,10 +1,7 @@
-//! 设置 2D 相机的曝光、添加 `ImageFilter` 工具，经 GDP 接收含图像的数据集并打印，对应 C++ 示例 `Acquire2dImage`。
+//! 设置 2D 相机的曝光、添加 `ImageFilter` 工具，经 GDP 接收含图像的数据集并打印。
 //!
-//! 适用于 2D 视觉设备（`2dscanner` 引擎）。
-//!
-//! 与 C++ 的差异：
-//! - 去掉没有活动异常时的 `throw;`：连接检查失败时返回错误，`receive` 返回的数据集至少有一条消息；
-//! - 去掉 `ENGINE_ID` 不是 `2dscanner` 时的警告：路径已固定为 `2dscanner` 引擎。
+//! 适用于 2D 视觉设备，路径固定为 `2dscanner` 引擎，与 `common::ENGINE_ID` 无关。示例先停止设备再改配置，
+//! 收到数据后停止设备；每次运行新建一个 `ImageFilter` 工具。
 
 mod common;
 

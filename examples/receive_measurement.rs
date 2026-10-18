@@ -1,6 +1,6 @@
-//! 经 GDP 同步接收工具的测量值，对应 C++ 示例 `ReceiveMeasurement`。
+//! 经 GDP 同步接收工具的测量值。
 //!
-//! 测量输出要先加入 GDP 输出（见 `configure_tool`）；实时数据与回放数据都可以。
+//! 测量输出要先加入 GDP 输出（见 `configure_tool`）；实时数据与回放数据都可以。结束时停止设备。
 
 mod common;
 

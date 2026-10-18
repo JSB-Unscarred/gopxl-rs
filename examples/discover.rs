@@ -1,10 +1,8 @@
-//! 发现网络上的 GoPxL 实例（传感器、PC 或 GoMax），打印各实例的信息与它可见的传感器，对应 C++ 示例 `Discover`。
+//! 发现网络上的 GoPxL 实例（传感器、PC 或 GoMax），打印各实例的信息与它可见的传感器。
 //!
-//! 只用 GoPxL 发现协议（不发现 Gocator 6.x 经典设备）。被远程控制（加速）的传感器上报的端口为 0，不能直接连接，只打印
-//! 发现信息。
-//!
-//! 与 C++ 的差异：连接失败直接返回错误（C++ 在 `Connect` 处捕获了错误的异常类型）；读取某个实例的传感器出错（包括
-//! 没有可见传感器）时打印错误并继续下一个实例（C++ 只对请求错误这样做，其余直接退出）。
+//! 只用 GoPxL 发现协议，Gocator 6.x 经典设备不在结果中。Accelerated 传感器由另一台 PC 上的 GoPxL 控制，上报的控制
+//! 端口为 0，不能直接连接，只打印发现信息。连接某个实例失败时返回错误；读取它的传感器出错（包括可见传感器为空）时
+//! 打印错误并继续下一个实例。
 
 mod common;
 
@@ -29,7 +27,7 @@ async fn main() -> common::Result {
 
     for (i, instance) in instances.iter().enumerate() {
         print_instance(i + 1, instance);
-        // 被远程控制的实例端口为 0，没有控制通道地址。
+        // 由另一台 PC 控制的实例端口为 0，取不到控制通道地址。
         let Some(addr) = instance.control_addr() else {
             continue;
         };
@@ -41,7 +39,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 打印发现到的一个实例；地址缺失时输出 `0.0.0.0`（C++ 对网关与掩码这样做）。
+/// 打印发现到的一个实例；地址缺失时输出 `0.0.0.0`。
 fn print_instance(number: usize, instance: &Instance) {
     let ip = |addr: Option<Ipv4Addr>| addr.unwrap_or(Ipv4Addr::UNSPECIFIED);
     let name = if instance.app_name.is_empty() {
@@ -81,7 +79,7 @@ fn print_instance(number: usize, instance: &Instance) {
     println!("HMI Status: {hmi_status}");
 }
 
-/// 打印实例可见、且在它的扫描引擎下有资源路径的传感器。网关、掩码与 DHCP 取自实例自身的第一块网卡（与 C++ 相同）。
+/// 打印实例可见、且在它的扫描引擎下有资源路径的传感器。网关、掩码与 DHCP 取自实例自身的第一块网卡。
 async fn print_sensors(system: &System) -> common::Result {
     let client = system.client();
     let visible = client.read(VISIBLE_SENSORS_PATH).response().await?.payload;

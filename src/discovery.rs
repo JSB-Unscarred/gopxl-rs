@@ -11,11 +11,11 @@
 //! | 24 | — | `i64` 状态：1，或 −992 表示服务端截断了某个字段 |
 //! | 32 | — | 紧凑 JSON 对象，以 NUL 结尾，最长 1504 字节 |
 //!
-//! 数据报来自网络，[`parse_announce`] 用以下约定修掉 C++ SDK 的缺陷：
-//! - 只解析收到的字节：JSON 取到第一个 NUL 或数据报末尾，1537 字节的 Announce 在 1536 字节的缓冲区里丢掉 NUL 后，
-//!   C++ 会越界读取；Length 字段与两个 SDK 一样不校验；
+//! 数据报来自网络，[`parse_announce`] 遵守以下约定：
+//! - 只解析收到的字节：JSON 取到第一个 NUL，缺少结尾 NUL 时取到数据报末尾；数据报边界由 UDP
+//!   给出，Length 字段不校验；
 //! - 读取都经过 `bytes::Buf` 的 `try_get_*`，下面的 lint 禁止下标与 unwrap，坏报文只得到 `Err`；
-//! - 字段缺失或类型不对时取默认值：C++ 在类型不对时抛异常，整条 Announce 被丢弃。
+//! - 单个字段缺失或类型不对时取默认值，整条 Announce 仍然可用。
 
 #![deny(
     clippy::indexing_slicing,
@@ -40,18 +40,21 @@ pub const PORT: u16 = 3320;
 
 /// 签名 `"LMIGOPXL"`。
 const SIGNATURE: u64 = 0x4C58_504F_4749_4D4C;
+/// 客户端广播的 Discover 命令的 `MsgId`。
 const DISCOVER: u64 = 0x0001;
+/// 客户端设置服务端地址的 `SetIp` 命令的 `MsgId`；本 crate 不发送，收到时识别为命令。
 const SET_IP: u64 = 0x0003;
+/// 服务端回复的 Announce 的 `MsgId`。
 const ANNOUNCE: u64 = 0x1001;
 
-/// 发现到的一个实例，对应 C++ 的 `GoInstance`。
+/// 发现到的一个实例。
 ///
 /// GoPxL 实例来自 Announce 的 JSON（[`parse_announce`]），经典实例来自 `GetIP` / `GetInfo` 回复
 /// （[`classic::handle_reply`]）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "五个互相独立的标志：dhcp、is_remote、address_conflict 对应 GoInstance 的 getter，classic、truncated 由设计规定"
+    reason = "五个互相独立的标志：dhcp、is_remote、address_conflict 来自 Announce，classic、truncated 标记来源与截断"
 )]
 pub struct Instance {
     /// 经 Gocator 6.x 经典协议发现的设备，不是 GoPxL 服务端。
@@ -85,15 +88,14 @@ pub struct Instance {
     /// 地址冲突（设备的地址是 link-local）。
     pub address_conflict: bool,
     /// HMI 状态：0 RUNNING、1 STOPPED、2 STARTING、3 STOPPING、4 `FAILED_TO_START`、5 `FAILED_TO_STOP`
-    /// （这张表只出现在 SDK 示例中）。
+    /// （取值表未经手册确认）。
     pub hmi_status: Option<i32>,
     /// Announce 的状态 ≠ 1（−992）：服务端按字节截断了某个超长字段。
     pub truncated: bool,
 }
 
 impl Instance {
-    /// 控制通道地址；能作为 GoPxL 服务端连接（GoPxL 实例、未被远程控制、地址与控制端口有效，SDK 示例
-    /// `Discover.cpp` 的判断）时为 `Some`。
+    /// 控制通道地址；能作为 GoPxL 服务端连接（GoPxL 实例、未被远程控制、地址与控制端口有效）时为 `Some`。
     pub fn control_addr(&self) -> Option<SocketAddrV4> {
         if self.classic || self.is_remote || self.control_port == 0 {
             return None;
@@ -124,7 +126,7 @@ impl From<TryGetError> for DiscoveryError {
     }
 }
 
-/// Discover 报文，对应 `GoPxLDiscoveryProto::Broadcast` 发出的 `DiscoveryBroadcastHeader`。
+/// Discover 报文。
 pub fn encode_discover() -> [u8; 24] {
     let mut out = [0; 24];
     put_u64s(&mut out, &[24, DISCOVER, SIGNATURE]);
@@ -138,7 +140,7 @@ fn put_u64s(out: &mut [u8], fields: &[u64]) {
     }
 }
 
-/// 解析 Announce，对应 `GoPxLDiscoveryProto::ParseReply`，约定见模块文档。状态 ≠ 1 时置 `truncated`；字段缺失
+/// 解析 Announce，约定见模块文档。状态 ≠ 1 时置 `truncated`；字段缺失
 /// 或类型不对时取默认值（`None` / 0 / false / `""`）；Discover 与 `SetIp`（包括自己发出的）返回
 /// [`DiscoveryError::Command`]。
 pub fn parse_announce(datagram: &[u8]) -> Result<Instance, DiscoveryError> {
@@ -194,7 +196,7 @@ fn string(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
 }
 
-/// 端口：`u16` 范围内的非负整数，否则为 0（C++ 截断为 `k16u`）。
+/// 端口：`u16` 范围内的非负整数，否则为 0。
 fn port(value: &Value) -> u16 {
     value
         .as_u64()

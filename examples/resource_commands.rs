@@ -1,9 +1,7 @@
 //! 用资源层调用命令：列出扫描器的命令，保存并改名作业，浏览作业文件，清除并重新对准扫描器（轮询对准状态），最后删除
-//! 演示作业，对应 C++ 示例 `ResourceCommands`。
+//! 演示作业。
 //!
 //! 会修改设备上的作业与对准结果；对准要求传感器上有扫描数据，否则只打印 `Alignment failed`、继续清理。
-//!
-//! 与 C++ 的差异：对准变换的浮点数按最短往返表示输出（C++ 的 `operator<<` 取 6 位有效数字）。
 
 mod common;
 
@@ -53,7 +51,7 @@ async fn main() -> common::Result {
     }
 
     println!("\n=== Job Files ===");
-    // 展开一层：条目就是各作业文件的数据，children 直接放进子资源的缓存，读 jobName 不再发请求。
+    // 展开一层：条目就是各作业文件的数据，children 直接放进子资源的缓存，读 jobName 直接取缓存。
     job_files.set_expand_level(1);
     let files = job_files.children(rel::ITEM).await?;
     println!("Saved jobs ({}):", files.len());
@@ -72,7 +70,7 @@ async fn main() -> common::Result {
 
     println!("\n=== Run Alignment ===");
     println!("Starting alignment...");
-    // 与 C++ 相同，对准、轮询与读变换中任何一步失败都只报告，继续清理。
+    // 演示用途，对准、轮询与读变换中任何一步失败都只报告，继续清理演示作业。
     if let Err(e) = align(&system, &scanner).await {
         eprintln!("Alignment failed: {e}");
         eprintln!("Ensure scan data is available on the sensor.");
@@ -91,7 +89,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 执行对准，每秒读一次对准状态直到不再是“对准中”，再打印传感器的对准变换。
+/// 执行对准，每秒读一次对准状态直到状态离开“对准中”，再打印传感器的对准变换。
 async fn align(system: &System, scanner: &Resource) -> common::Result {
     scanner
         .command("align", Value::object())
@@ -109,7 +107,7 @@ async fn align(system: &System, scanner: &Resource) -> common::Result {
             break state;
         }
     };
-    // C++ 的 alignmentStates.at() 对未知状态抛异常，同样归入对准失败。
+    // 未知状态归入对准失败。
     let label = match state {
         UNALIGNED => "Not Aligned",
         ALIGNED => "Aligned",

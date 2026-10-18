@@ -1,15 +1,13 @@
-//! 动态值：控制通道消息体的内存表示，取代 C++ SDK 的 `GoJson`（`nlohmann::json` 3.8.0 的包装）。
+//! 动态值：控制通道消息体的内存表示。
 //!
-//! 与 `GoJson` 的差异都用来修掉它的缺陷：
-//! - 值语义：`Clone` 是深拷贝，不存在赋值后共享存储；读取（[`Value::pointer`]、`Index`、`as_*`）不修改文档；
-//! - [`Value::set`] / [`Value::remove`] 直接操作树，不经过 flatten，不会把空容器变成 null、把数组变成对象，
-//!   删除数组元素时后面的元素前移而不是留下 null。
+//! - 值语义：`Clone` 是深拷贝，副本之间互不影响；读取（[`Value::pointer`]、`Index`、`as_*`）不修改文档；
+//! - [`Value::set`] / [`Value::remove`] 直接操作树：空容器仍是空容器，数组仍是数组，删除数组元素时后面的元素前移。
 //!
-//! 对象用 `BTreeMap`：键按字节序排列，与 nlohmann 的 `std::map` 相同，编码时不用排序就得到 C++ SDK 的字节。
+//! 对象用 `BTreeMap`：键按字节序排列，编码时不用另外排序，同一个值总是编码成同样的字节。
 //!
 //! serde：`Value` 实现 `Serialize` 与 `Deserialize`，`&Value` 实现 `Deserializer`，载荷按需反序列化成调用方自己的
-//! 类型（`T::deserialize(&value)`，对应 nlohmann 的 `get<T>()`），`Value` 也能作为别的类型的字段。线上的 MessagePack
-//! 仍由 [`msgpack`] 手写，与 C++ SDK 逐字节一致。
+//! 类型（`T::deserialize(&value)`），`Value` 也能作为别的类型的字段。线上的 MessagePack 由 [`msgpack`] 手写，
+//! 编码规则见该模块。
 
 pub mod msgpack;
 
@@ -61,7 +59,7 @@ pub enum Value {
     Int(i64),
     /// 大于 `i64::MAX` 的整数；用 `Value::from(u64)` 构造即自动归一化。
     UInt(u64),
-    /// 浮点数；服务端写出的 float32 在解码时拓宽为 `f64`（与 nlohmann 相同）。
+    /// 浮点数；服务端写出的 float32 在解码时拓宽为 `f64`。
     Float(f64),
     /// 字符串。
     Str(String),
@@ -73,7 +71,7 @@ pub enum Value {
     Map(Map),
 }
 
-/// 对象，键按字节序排列（与 nlohmann 的 `std::map` 相同）。
+/// 对象，键按字节序排列。
 pub type Map = BTreeMap<String, Value>;
 
 /// [`Value::set`] 的错误：指针穿过标量，或数组下标不存在。携带出错的指针。
@@ -82,7 +80,7 @@ pub type Map = BTreeMap<String, Value>;
 pub struct PointerError(pub String);
 
 impl Value {
-    /// 空对象 `{}`，即 `GoJson` 的默认值。
+    /// 空对象 `{}`，请求参数与补丁的起点。
     pub fn object() -> Self {
         Self::Map(Map::new())
     }
@@ -100,7 +98,7 @@ impl Value {
         }
     }
 
-    /// 能放进 `i64` 的整数；浮点数返回 `None`，不按 nlohmann 的规则截断。
+    /// 能放进 `i64` 的整数；浮点数返回 `None`，不截断。
     pub fn as_i64(&self) -> Option<i64> {
         match *self {
             Self::Int(v) => Some(v),
@@ -109,7 +107,7 @@ impl Value {
         }
     }
 
-    /// 非负整数；负数与浮点数返回 `None`（nlohmann 会把负数回绕成大正数）。
+    /// 非负整数；负数与浮点数返回 `None`，不回绕。
     pub fn as_u64(&self) -> Option<u64> {
         match *self {
             Self::Int(v) => u64::try_from(v).ok(),
@@ -119,10 +117,7 @@ impl Value {
     }
 
     /// 任意数值转为 `f64`；绝对值超过 2⁵³ 的整数会舍入。
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "与 nlohmann 的 get<double>() 相同，舍入是预期行为"
-    )]
+    #[allow(clippy::cast_precision_loss, reason = "整数转为浮点数时舍入是预期行为")]
     pub fn as_f64(&self) -> Option<f64> {
         match *self {
             Self::Int(v) => Some(v as f64),
@@ -140,7 +135,7 @@ impl Value {
         }
     }
 
-    /// 二进制，对应 `GoJson::GetBinary`；克隆返回的 `Bytes` 不复制数据。
+    /// 二进制；克隆返回的 `Bytes` 不复制数据。
     pub fn as_bytes(&self) -> Option<&Bytes> {
         match self {
             Self::Bin(v) => Some(v),
@@ -164,9 +159,9 @@ impl Value {
         }
     }
 
-    /// 按 JSON Pointer（RFC 6901）读取，对应 `GoJson::At` / `Get`，不存在时返回 `None`，不修改文档。
+    /// 按 JSON Pointer（RFC 6901）读取，不存在时返回 `None`，不修改文档。
     ///
-    /// 与 `GoJsonPointer` 相同，缺少前导 `/` 时自动补上：`"a/b"` 等同于 `"/a/b"`；`""` 指向根。
+    /// 缺少前导 `/` 时自动补上：`"a/b"` 等同于 `"/a/b"`；`""` 指向根。
     pub fn pointer(&self, pointer: &str) -> Option<&Value> {
         tokens(pointer).try_fold(self, |node, token| match node {
             Self::Map(map) => map.get(&*token),
@@ -175,9 +170,9 @@ impl Value {
         })
     }
 
-    /// 把 `pointer` 处设为 `value`，对应 `GoJson::Set` / `Replace`。
+    /// 把 `pointer` 处设为 `value`。
     ///
-    /// 缺失的对象键与 `Nil` 节点自动创建为对象（与 nlohmann 的 `operator[]` 相同），所以可以从 `Nil` 或 `{}`
+    /// 缺失的对象键与 `Nil` 节点自动创建为对象，所以可以从 `Nil` 或 `{}`
     /// 开始构建嵌套的请求或补丁；`value` 为 `Nil` 时保存显式的 null。数组只能写已有下标或用 `-` 追加，
     /// 不会被自动创建。只有穿过已有节点时才会出错，所以出错时文档不变。
     pub fn set(&mut self, pointer: &str, value: impl Into<Value>) -> Result<(), PointerError> {
@@ -205,7 +200,7 @@ impl Value {
         Ok(())
     }
 
-    /// 删除 `pointer` 处的值并返回它，对应 `GoJson::Remove`；删除数组元素时后面的元素前移。根不能删除。
+    /// 删除 `pointer` 处的值并返回它；删除数组元素时后面的元素前移。根不能删除。
     pub fn remove(&mut self, pointer: &str) -> Option<Value> {
         let mut tokens: Vec<_> = tokens(pointer).collect();
         let last = tokens.pop()?;
@@ -225,8 +220,7 @@ impl Value {
         }
     }
 
-    /// 应用 RFC 7396 merge patch，对应 `GoJson::Merge`：补丁中的 `Nil` 删除对应的键，对象递归合并，
-    /// 其他值整体替换。
+    /// 应用 RFC 7396 merge patch：补丁中的 `Nil` 删除对应的键，对象递归合并，其他值整体替换。
     pub fn merge_patch(&mut self, patch: &Value) {
         let Self::Map(entries) = patch else {
             *self = patch.clone();
@@ -246,7 +240,7 @@ impl Value {
     }
 }
 
-/// 把 JSON Pointer 拆成解除转义的 token；缺少前导 `/` 时视为有，`""` 没有 token（指向根）。
+/// 把 JSON Pointer 拆成解除转义的 token；缺少前导 `/` 时视为有，`""` 产生零个 token（指向根）。
 /// 不含 `~` 的 token 直接借用，读取响应时不分配。
 pub(crate) fn tokens(pointer: &str) -> impl Iterator<Item = Cow<'_, str>> {
     let rest = pointer.strip_prefix('/').unwrap_or(pointer);
@@ -264,7 +258,7 @@ pub(crate) fn tokens(pointer: &str) -> impl Iterator<Item = Cow<'_, str>> {
         })
 }
 
-/// 数组下标：十进制数字，除 `0` 外没有前导零（RFC 6901）。`str::parse` 只比它多接受前导 `+`。
+/// 数组下标：十进制数字，除 `0` 外不带前导零（RFC 6901）。`str::parse` 只比它多接受前导 `+`。
 pub(crate) fn array_index(token: &str) -> Option<usize> {
     if token.starts_with('+') || (token.len() > 1 && token.starts_with('0')) {
         None
@@ -312,22 +306,21 @@ from_lossless! {
     f32 => Float, f64 => Float,
     &str => Str, String => Str,
     Map => Map, Vec<Value> => Array,
-    // `Vec<u8>` 是二进制，与 `GoJson::Set(path, std::vector<k8u>)` 相同；不提供 `Vec<T>` 到数组的泛型转换，
-    // 免得字节缓冲被悄悄编码成整数数组。
+    // `Vec<u8>` 是二进制；不提供 `Vec<T>` 到数组的泛型转换，免得字节缓冲被悄悄编码成整数数组。
     Bytes => Bin, Vec<u8> => Bin,
 }
 
-/// 能放进 `i64` 时为 `Int`，否则为 `UInt`，保持每个数只有一种表示。
+/// 能放进 `i64` 时为 `Int`，否则为 `UInt`，确保每个数只有一种表示。
 impl From<u64> for Value {
     fn from(v: u64) -> Self {
         i64::try_from(v).map_or(Self::UInt(v), Self::Int)
     }
 }
 
-/// JSON 文本，对应 `GoJson::ToString`；`{:#}` 输出缩进格式。经 `serde_json` 输出，只用于日志与调试。
+/// JSON 文本；`{:#}` 输出缩进格式。经 `serde_json` 输出，只用于日志与调试。
 ///
 /// JSON 无法表示的值：`Bin` 输出为字符串 `"<bin N bytes>"`（[`Serialize`] 则输出字节），免得打印归档时输出几百 MB；
-/// NaN 与无穷输出为 `null`（与 nlohmann 相同）。
+/// NaN 与无穷输出为 `null`。
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = if f.alternate() {
@@ -354,9 +347,8 @@ impl Serialize for Text<'_> {
     }
 }
 
-/// 解析 JSON 文本，对应 `GoJson(const std::string&)` 与 `GoJson::ParseString`，例如
-/// `r#"{"enabled":true}"#.parse::<Value>()`。嵌套深度受 `serde_json` 的 128 层上限约束。浮点数正确舍入，与 `GoJson`
-/// 逐位相同；整数文本 `-0` 是 `Float(-0.0)`（`GoJson` 为整数 0）。
+/// 解析 JSON 文本，例如 `r#"{"enabled":true}"#.parse::<Value>()`。嵌套深度受 `serde_json` 的 128 层上限约束。
+/// 浮点数正确舍入（`serde_json` 的 `float_roundtrip`）；整数文本 `-0` 是 `Float(-0.0)`，负零的符号得以保留。
 impl FromStr for Value {
     type Err = serde_json::Error;
 
@@ -468,7 +460,7 @@ impl<'de> IntoDeserializer<'de, de::value::Error> for &'de Value {
     }
 }
 
-/// 把 `Value` 反序列化成任意类型，对应 nlohmann 的 `get<T>()`：`Nil` 是 unit 与 `None`；整数经 serde 的范围检查，
+/// 把 `Value` 反序列化成任意类型：`Nil` 是 unit 与 `None`；整数经 serde 的范围检查，
 /// 越界报错而不截断；`Str`、`Bin` 与对象的键按借用交给访问者，`&str`、`&[u8]` 零拷贝；枚举接受字符串（单元变体）
 /// 与单键对象；元组与结构体要求数组的元素数正好。错误是 [`serde::de::value::Error`]，只带一句说明。
 impl<'de> Deserializer<'de> for &'de Value {
@@ -544,7 +536,6 @@ fn borrowed_entries(
         .map(|(key, value)| (BorrowedStrDeserializer::new(key), value))
 }
 
-// serde 接入是自有约定（nlohmann 的 get<T>() 截断整数、复制字符串），无法与官方实现对照。
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;

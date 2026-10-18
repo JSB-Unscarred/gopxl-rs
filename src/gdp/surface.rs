@@ -4,8 +4,7 @@ use bytes::{Buf, Bytes};
 
 use super::{Error, PixelFormat, array, optional, product, read_bool, read_vec, section, take};
 
-/// 表面属性（C++ `GoGdpSurfaceBase`）。毫米坐标为 `offset + scale × 原始值`（统一表面的 x、y 原始值是列、行下标），
-/// SDK 不提供换算。
+/// 表面属性。毫米坐标为 `offset + scale × 原始值`（统一表面的 x、y 原始值是列、行下标），由调用方换算。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceAttrs {
     /// 行数 L。
@@ -38,8 +37,8 @@ pub struct SurfaceAttrs {
 }
 
 impl SurfaceAttrs {
-    /// 每行强度的字节数（C++ `IntensityRowSize`）：旧式格式每像素 1 字节（包括 16 位与 BGRX），
-    /// PFNC 格式为 `ceil(iW × 位数 / 8)`。
+    /// 每行强度的字节数：旧式格式每像素 1 字节（包括 16 位与 BGRX），GenICam PFNC 像素格式为
+    /// `ceil(iW × 位数 / 8)`。
     pub fn intensity_row_size(&self) -> usize {
         if self.intensity_format.is_legacy() {
             self.intensity_width as usize
@@ -88,14 +87,15 @@ impl SurfaceAttrs {
         product(self.length as usize, self.width as usize)
     }
 
-    /// 紧跟点数组的 iL 行强度。每块数据只检查 `剩余 ≥ 需要`，与 GDP-TCP 的 SDK 规则相同。
+    /// 紧跟点数组的 iL 行强度。只检查剩余字节够不够，多出的字节忽略；`/dataSources` 流的载荷按同一
+    /// 规则解码，见 [协议假设 T4](crate::docs::assumptions)。
     fn take_intensity(&self, buf: &mut Bytes) -> Result<Bytes, Error> {
         let len = product(self.intensity_length as usize, self.intensity_row_size())?;
         Ok(take(buf, len)?)
     }
 }
 
-/// 统一表面（类型 14，`GoGdpSurfaceUniform`）。
+/// 统一表面（类型 14）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniformSurface {
     /// 属性。
@@ -106,14 +106,14 @@ pub struct UniformSurface {
     pub intensity: Bytes,
 }
 
-/// 表面点云（类型 15，`GoGdpSurfacePointCloud`）。
+/// 表面点云（类型 15）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfacePointCloud {
     /// 属性。
     pub attrs: SurfaceAttrs,
     /// 相邻的点是否相连（可以画成网格），不表示有序。
     pub is_adjacent: bool,
-    /// L×W 个 `(x, y, z)` 原始值，行主序；z 为 `i16::MIN` 表示无效（与 SDK 示例相同）。
+    /// L×W 个 `(x, y, z)` 原始值，行主序；z 为 `i16::MIN` 表示无效。
     pub points: Vec<[i16; 3]>,
     /// iL 行、每行 [`intensity_row_size`](SurfaceAttrs::intensity_row_size) 字节的强度，帧的零拷贝切片。
     pub intensity: Bytes,

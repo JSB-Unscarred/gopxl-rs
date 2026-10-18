@@ -1,8 +1,7 @@
-//! 资源 schema（读取时 `includeSchema` 得到的 `_schema`）的导航与校验，对应 C++ 的 `GoSchemaValidator`。
+//! 资源 schema（读取时 `includeSchema` 得到的 `_schema`）的导航与校验。
 //!
 //! GoPxL 的 schema 是基于 JSON Schema Draft 2019-09 的自定义方言：不支持 `$ref` 与组合关键字，另有 `binary`
-//! 类型和 `unit`、`visibility`、`extendedType` 等注解。这里只实现 `GoSchemaValidator` 的导航与单节点校验，
-//! 注解经 [`Value`] 直接读取。校验只是建议性的，服务端才是裁判。
+//! 类型和 `unit`、`visibility`、`extendedType` 等注解。本模块只实现导航与单节点校验，注解经 [`Value`] 直接读取。校验只是建议性的，服务端才是裁判。
 
 #![deny(
     clippy::indexing_slicing,
@@ -15,16 +14,15 @@ use std::fmt;
 
 use crate::value::{Value, array_index, tokens};
 
-/// 浮点比较的容差，与 C++ 相同。
+/// 浮点比较（`multipleOf`、`enum`）的容差。
 const EPSILON: f64 = 1e-9;
 
-/// 找出 JSON Pointer `path` 处数据对应的子 schema，对应 `GoSchemaValidator::SchemaForPath`。
+/// 找出 JSON Pointer `path` 处数据对应的子 schema。
 ///
 /// 路径与 [`Value::pointer`] 同一语法，校验与写入因此指向同一节点：`""` 为根，`"/"` 是键 `""`，末尾的 `/` 是
-/// 一个空段，数组下标不带前导零（C++ 的 `SplitPath` 把 `"/"` 当作根、忽略末尾的 `/`，与写入补丁的 nlohmann
-/// pointer 不一致）。对象节点（或不带 `type` 的节点）进入 `properties/<段>`；数组节点在 `items` 是数组（元组
-/// 形式）时取对应元素，否则所有元素共用 `items`。可空类型写作 `["array", "null"]` 时同样按数组导航（C++ 只认
-/// 字符串形式的 `type`）。路径不在 schema 中时为 `None`（C++ 抛 `GoResourceError`），调用方按“不约束”处理。
+/// 一个空段，数组下标不带前导零。对象节点（或不带 `type` 的节点）进入 `properties/<段>`；数组节点在 `items` 是
+/// 数组（元组形式）时取对应元素，否则所有元素共用 `items`。可空类型写作 `["array", "null"]` 时同样按数组导航。
+/// 路径不在 schema 中时为 `None`，调用方按“不约束”处理。
 pub fn schema_for_path<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
     tokens(path).try_fold(schema, |node, token| {
         if has_type(node, "array") {
@@ -42,13 +40,12 @@ pub fn schema_for_path<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
     })
 }
 
-/// 用一个 schema 节点校验 `value`，对应 `GoSchemaValidator::Validate`。每条问题是被违反的关键字与界限
-/// （`"maximum 10"`、`"type \"integer\""`、`"readOnly"`），空表即通过；C++ 的 `Errors()` 同样是字符串列表。
+/// 用一个 schema 节点校验 `value`。每条问题是被违反的关键字与界限（`"maximum 10"`、`"type \"integer\""`、
+/// `"readOnly"`），空表即通过。
 ///
-/// 与 C++ 相同，只校验这一层（不递归进 `properties` / `items`），`readOnly` 与类型不符时立即返回，其余问题
-/// 全部收集。修正 C++ 的缺陷：`binary` 要求 `Bin`（C++ 要求字符串）；`type` 可以是
-/// 数组（可空类型，C++ 跳过类型检查）；`multipleOf` 对负数不误报；`enum` 中的整数精确比较（C++ 截断为 `int`）；
-/// 空 `enum` 不约束（C++ 拒绝一切值）；字符串长度按字符计（C++ 按字节）。
+/// 只校验这一层（不递归进 `properties` / `items`），`readOnly` 与类型不符时立即返回，其余问题全部收集。
+/// `binary` 要求 [`Value::Bin`]；`type` 可以是数组（可空类型）；`multipleOf` 对负数同样适用；`enum` 中的整数精确
+/// 比较、浮点数按容差比较；空 `enum` 不约束；字符串长度按字符计。
 pub fn validate(value: &Value, node: &Value) -> Vec<String> {
     if node["readOnly"].as_bool() == Some(true) {
         return vec!["readOnly".to_owned()];
@@ -68,7 +65,7 @@ pub fn validate(value: &Value, node: &Value) -> Vec<String> {
         issues.extend(violated(node, "exclusiveMaximum", Value::as_f64, |l| {
             v >= l
         }));
-        // `%` 的余数与被除数同号；比较绝对值，负数在 −m 附近的余数不再误报。
+        // `%` 的余数与被除数同号，所以比较绝对值：余数接近 0 或接近 |d|（浮点误差）都算整除。
         issues.extend(violated(node, "multipleOf", Value::as_f64, |d| {
             let rem = (v % d).abs();
             d.abs() > 0.0 && rem > EPSILON && d.abs() - rem > EPSILON
@@ -131,8 +128,8 @@ fn has_type(node: &Value, name: &str) -> bool {
     type_names(node).any(|ty| ty == name)
 }
 
-/// 值是否属于类型名 `ty`；`integer` 也是 `number`，`null` 只接受 `Nil`（C++ 不认识 `null`，一律通过）。不认识的
-/// 类型名不约束（与 C++ 相同）。
+/// 值是否属于类型名 `ty`；`integer` 也是 `number`，`null` 只接受 `Nil`。未知的类型名不约束，免得误拒服务端
+/// 新增类型的值。
 fn type_matches(value: &Value, ty: &str) -> bool {
     match ty {
         "null" => value.is_nil(),
@@ -158,13 +155,12 @@ fn enum_eq(value: &Value, option: &Value) -> bool {
     }
 }
 
-// 校验与导航是刻意不同于 C++ 的自有算法，无法与官方实现对照。
 #[cfg(test)]
 mod tests {
     use super::{schema_for_path, validate};
     use crate::value::Value;
 
-    // 约定：binary 要求 Bin；type 数组表示可空；multipleOf 对负数不误报；enum 中的整数精确比较；空 enum 不约束；
+    // 约定：binary 要求 Bin；type 数组表示可空；multipleOf 对负数同样适用；enum 中的整数精确比较；空 enum 不约束；
     // 长度按字符计。schema_for_path：路径与 Value::pointer 同一语法（"/" 是键 ""），可空数组同样按 items 导航。
     #[test]
     fn validation_follows_own_conventions() {

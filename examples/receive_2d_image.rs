@@ -1,13 +1,8 @@
-//! 配置 2D 相机与 Script 工具，经 GDP 接收含图像的数据集并把图像写成 BMP，对应 C++ 示例 `Receive2dImage`。
+//! 配置 2D 相机与 Script 工具，经 GDP 接收含图像的数据集并把图像写成 BMP。
 //!
-//! 适用于 2D 视觉设备（`2dscanner` 引擎），设备上要有作业 `job01`。Script 工具把图像亮度乘 3 后输出，并输出最小、
-//! 最大与平均亮度三个测量值。图像写到 `common::IMAGE_FILE`。
-//!
-//! 与 C++ 的差异：
-//! - 去掉没有活动异常时的 `throw;`：连接检查失败时返回错误，`receive` 返回的数据集至少有一条消息；
-//! - 路径固定为 `2dscanner` 引擎，去掉 `ENGINE_ID` 不是 `2dscanner` 时的警告（C++ 取 `SampleUtils` 的线激光
-//!   引擎路径，需手动切换）；
-//! - 不支持的像素格式报错（C++ 的 `ImageUtils` 写出只有文件头的 BMP）。
+//! 适用于 2D 视觉设备，路径固定为 `2dscanner` 引擎，与 `common::ENGINE_ID` 无关；设备上要有作业 `job01`。示例先
+//! 停止设备、加载 `job01` 再改配置，收到数据后停止设备。Script 工具把图像亮度乘 3 后输出，并输出最小、最大与平均
+//! 亮度三个测量值。图像写到 `common::IMAGE_FILE`，像素格式不支持时返回错误。
 
 mod common;
 

@@ -1,9 +1,8 @@
 //! 添加并配置测量工具：加入 Profile Bounding Box、开启区域、改 extId、修改区域、连接数据源、开启测量输出，最后把
-//! 测量值加入 GDP 输出，对应 C++ 示例 `ConfigureTool`。
+//! 测量值加入 GDP 输出 1 号。
 //!
-//! 设备上要有扫描数据（实时或回放）才能读到测量值；加入的输出由 `receive_measurement` 接收。
-//!
-//! 与 C++ 的差异：`autoshift` 改为手册的 `autoShift`；工具路径按 href 原样使用（C++ 去掉了开头的 `/`）。
+//! 设备上要有扫描数据（实时或回放）才能读到测量值；加入的输出由 `receive_measurement` 接收。每次运行新建一个工具并
+//! 把 extId 设为 `ProfileBoundingBox-demo`，重复运行前先删除上次创建的工具。
 
 mod common;
 
@@ -96,7 +95,7 @@ async fn main() -> common::Result {
     println!("\nMeasurement value: {value}");
 
     common::enable_gdp(client).await?;
-    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径（href）的最后一段。
+    // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径（href）的最后一段（见 `src/docs/assumptions.rs` 的 R2）。
     let tool_id = tool_path.rsplit('/').next().unwrap_or_default();
     println!("\nAdding measurement value to output...");
     common::add_output(client, &format!("tools:{tool_id}:outputs:X"), 1).await?;

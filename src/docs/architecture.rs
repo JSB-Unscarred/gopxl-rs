@@ -2,27 +2,28 @@
 //!
 //! ## 分层
 //!
-//! - 编解码（纯函数与纯数据结构，不做 I/O、不起任务）：[`value`](crate::value)（[`Value`](crate::Value) 与
-//!   MessagePack）、[`frame`](crate::frame)（长度前缀帧）、[`control`](crate::control)（控制通道消息、FIFO 对应器
-//!   `ControlCore`、订阅匹配 [`SubscriptionExpr`](crate::control::SubscriptionExpr)）、[`gdp`](crate::gdp)（GDP 消息）、
-//!   [`discovery`](crate::discovery)（发现报文）、[`schema`](crate::schema)（schema 导航与校验）。
-//! - 连接（tokio 任务与 socket）：主连接 [`Connection`](crate::control::Connection) / [`Client`](crate::control::Client)、
+//! - 编解码：纯函数与数据结构，不做 I/O、不起任务。[`value`](crate::value)（[`Value`](crate::Value) 与
+//!   MessagePack）、[`frame`](crate::frame)（长度前缀帧）、[`control`](crate::control)（控制通道消息、请求与应答的
+//!   配对队列 `ControlCore`、订阅匹配 [`SubscriptionExpr`](crate::control::SubscriptionExpr)）、[`gdp`](crate::gdp)
+//!   （GDP 消息）、[`discovery`](crate::discovery)（发现报文）、[`schema`](crate::schema)（schema 导航与校验）。
+//! - 连接：tokio 任务与 socket。主连接 [`Connection`](crate::control::Connection) / [`Client`](crate::control::Client)、
 //!   流连接 [`StreamHandle`](crate::control::StreamHandle)、文件传输连接 [`Client::transfer`](crate::control::Client::transfer)、
 //!   GDP 连接 [`gdp::Client`](crate::gdp::Client)、UDP 发现 [`discover`](crate::discovery::discover)。
-//! - 门面：[`System`](crate::System)（一台设备，拥有主连接）；资源层 [`Resource`](crate::resource::Resource)（路径、
-//!   读缓存、schema 校验、订阅）。
+//! - 设备与资源：[`System`](crate::System) 代表一台设备，拥有主连接；[`Resource`](crate::resource::Resource) 封装一个
+//!   资源路径，带读缓存、schema 校验与订阅。
 //!
 //! 所有 I/O 都是 `async fn`，在调用方的 tokio 运行时上执行。
 //!
 //! ## 数据流
 //!
-//! 控制通道的请求：[`Transaction::response`](crate::control::Transaction::response) → 取写锁 → `ControlCore::register`
-//! （槽位入 FIFO，返回 `oneshot` 接收端）→ 写出整帧 → 释放写锁 → 等应答（带超时）。
+//! 控制通道的请求：[`Transaction::response`](crate::control::Transaction::response) → 取写锁 → 在配对队列末尾登记，
+//! 得到 `oneshot` 接收端 → 写出整帧 → 释放写锁 → 等应答（带超时）。服务端按请求顺序应答，所以每个应答交给队首的
+//! 登记项。
 //!
 //! 主连接的读任务：socket → [`FrameReader`](crate::frame::FrameReader) → [`Inbound::decode`](crate::control::Inbound::decode)
-//! → 取分派锁 → 响应交给 FIFO 队首槽位（接收端已丢弃的槽位照样出队），通知按
+//! → 取分派锁（保护配对队列与订阅表）→ 应答交给队首登记项（等待方已超时或放弃时直接丢弃该应答），通知按
 //! [`SubscriptionExpr::delivers`](crate::control::SubscriptionExpr::delivers) 放进各订阅的有界队列（满了丢最老的，
-//! 计入 [`Notice::Lagged`](crate::control::Notice::Lagged)）。
+//! 丢掉的条数由 [`Notice::Lagged`](crate::control::Notice::Lagged) 报告）。
 //!
 //! 流：[`open_stream`](crate::control::Client::open_stream) 开一条连接，写出 `stream` 请求；读任务把应答交给
 //! `oneshot`，流消息进容量 4 的 `mpsc`（应答之前到达的先缓存，应答之后按原序放入）。
@@ -35,18 +36,18 @@
 //! 发现：每个 IPv4 网卡一个发送 socket，在 0、300、1000 ms 广播 Discover；接收 socket 收 Announce，`select!` 直到
 //! 超时；开启经典协议时另有 3220 端口的一对收发。
 //!
-//! 资源：[`data`](crate::resource::Resource::data) 先 `refresh`（连接的写计数变了、连接断开或订阅队列有通知时丢弃
-//! 缓存）→ 缓存为空时 `read` → 缓存；[`update`](crate::resource::Resource::update) 开启校验时先按 `_schema` 逐值校验，
-//! 再发补丁。`create` / `update` / `delete` / `call` 在写锁内给写计数加一，文件传输在完成后加一。
+//! 资源：每条主连接有一个写计数，`create` / `update` / `delete` / `call` 在写锁内加一，文件传输在完成后加一。
+//! [`data`](crate::resource::Resource::data) 在写计数变了、连接断开或订阅队列有通知时丢弃缓存，缓存为空时 `read`；
+//! [`update`](crate::resource::Resource::update) 开启校验时先按 `_schema` 逐值校验，再发补丁。
 //!
 //! ## 所有权
 //!
 //! - `Connection` 唯一拥有主连接，不 `Clone`；`Client` 是 `Arc` 句柄，可 clone、可移到别的任务，不让连接存活。
-//!   `Connection` Drop → `teardown`：记下原因、shutdown、中止读任务、挂起的请求以同一个 `Arc<DisconnectReason>` 失败、
-//!   关闭订阅队列。读任务出错或 EOF 时走同一条路径。
+//!   `Connection` Drop 时记下原因、shutdown、中止读任务，挂起的请求以同一个 `Arc<DisconnectReason>` 失败，订阅队列
+//!   关闭。读任务出错或读到 EOF 时走同一条路径。
 //! - `StreamHandle`、`gdp::Client` 各拥有一条连接与它的读任务，Drop 即 shutdown 并中止读任务。
 //! - [`Subscription`](crate::control::Subscription) 拥有自己的队列，读任务只持 `Weak`。
-//!   [`unsubscribe`](crate::control::Subscription::unsubscribe) 或 Drop 时从分派表注销；同一表达式的最后一个本地订阅
+//!   [`unsubscribe`](crate::control::Subscription::unsubscribe) 或 Drop 时从订阅表注销；同一表达式的最后一个本地订阅
 //!   写出 `unSub`（Drop 时交给一个 task）。
 //! - [`Transaction`](crate::control::Transaction) 持 `Client` 克隆与请求，`response` 时才写出。
 //! - `Resource` 由调用方唯一拥有：持 `Client`、数据与 schema 缓存、可选的 `Subscription`。
@@ -56,9 +57,9 @@
 //! ## 任务与锁
 //!
 //! - 每条主连接、流连接、GDP 连接一个读任务；请求、文件传输与发现在调用方的任务上执行。读任务不执行用户代码：
-//!   通知由调用方拉取，流与 GDP 的有界通道满时读任务等待，背压经 TCP 传到服务端。
-//! - 主连接两把锁，顺序固定为写锁 → 分派锁：写锁是 `tokio::sync::Mutex<写半边>`，覆盖登记槽位、整帧写出与订阅的
-//!   登记、注销；分派锁是 `std::sync::Mutex`，读任务处理每一帧时持有，不跨 `await`。
+//!   通知由调用方拉取；流与 GDP 的有界通道满时读任务暂停读取，TCP 窗口随之收紧，服务端放慢发送。
+//! - 主连接两把锁，顺序固定为写锁 → 分派锁：写锁是 `tokio::sync::Mutex<写半边>`，覆盖登记、整帧写出与订阅的登记、
+//!   注销；分派锁是 `std::sync::Mutex`，读任务处理每一帧时持有，不跨 `await`。
 //!
 //! ## 超时
 //!
@@ -76,12 +77,12 @@
 //! - [`FrameError`](crate::frame::FrameError)：读取失败、读取超时、帧中途 EOF 或长度越界，连接随之关闭。
 //! - [`control::InboundError`](crate::control::InboundError)：服务端从不产生的帧，连接随之关闭；未知的 `type` 是
 //!   `Inbound::Other`。
-//! - [`gdp::Error`](crate::gdp::Error)：`Truncated`、`Malformed`。信封或 CAS 坏掉时 `decode_message` 返回 `Err`，
-//!   之后的部分坏掉时 `body` 为 `Body::Invalid`。
+//! - [`gdp::Error`](crate::gdp::Error)：`Truncated`、`Malformed`。消息头或公共属性段（CAS）坏掉时 `decode_message`
+//!   返回 `Err`，之后的部分坏掉时 `body` 为 `Body::Invalid`。
 //! - [`discovery::DiscoveryError`](crate::discovery::DiscoveryError)：丢弃该数据报；`Command` 是客户端发出的命令。
 //! - [`DisconnectReason`](crate::DisconnectReason)：`Closed`（本端关闭）、`Eof`（服务端关闭）、`Read` / `Write`
 //!   （socket 错误或超时）、`Decode`（坏帧）；同一条连接上所有挂起的请求得到同一个 `Arc`。
-//! - [`Error`](crate::Error)：`Connect`、`Timeout`（槽位成为墓碑，连接照常可用）、`Disconnected`、`Request`
+//! - [`Error`](crate::Error)：`Connect`、`Timeout`（迟到的应答被丢弃，连接照常可用）、`Disconnected`、`Request`
 //!   （`status` 不是 OK，携带完整响应）、`Payload`（要读取的字段缺失或无法反序列化）、`InvalidArgument`、
 //!   `Validation`（补丁不符合 schema，请求未发出）。
 //! - [`gdp::RecvError`](crate::gdp::RecvError)：`Timeout`、`Incomplete`（已收到的保留）、`Disconnected`。

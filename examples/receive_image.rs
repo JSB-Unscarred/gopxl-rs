@@ -1,11 +1,7 @@
-//! 经 GDP 同步接收高度图图像并写成 BMP，对应 C++ 示例 `ReceiveImage`。
+//! 经 GDP 同步接收高度图图像并写成 BMP。
 //!
-//! 适用于 Gocator 线激光传感器（`common::ENGINE_ID`）；使用实时数据时先把扫描模式切换为图像。图像写到
-//! `common::IMAGE_FILE`。
-//!
-//! 与 C++ 的差异：
-//! - 先切换扫描模式再启动（C++ 启动之后才切换）；
-//! - 按数据源 ID 精确判断图像是否已在 GDP 输出中（见 `common::ensure_output`）。
+//! 适用于 Gocator 线激光传感器（`common::ENGINE_ID`）；使用实时数据时先把扫描模式切换为图像再启动设备。图像不在
+//! GDP 输出中时加入（见 `common::ensure_output`）。图像写到 `common::IMAGE_FILE`，结束时停止设备。
 
 mod common;
 

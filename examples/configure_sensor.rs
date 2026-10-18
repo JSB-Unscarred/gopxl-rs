@@ -1,11 +1,7 @@
-//! 配置扫描器与传感器：软件触发、单次与多次曝光、显示名、有效区域、数字输出，并读出网络配置，对应 C++ 示例
-//! `ConfigureSensor`。
+//! 配置扫描器与传感器：软件触发、单次与多次曝光、显示名、有效区域、数字输出，并读出网络配置。
 //!
-//! 会修改设备上的触发源、曝光、显示名、有效区域与数字输出。只移植 Gocator 传感器分支：SmartCam 没有扫描模式，
-//! 参数都在传感器上（软件触发源为 2，曝光在 `/parameters/generalSettings/exposure`，没有多次曝光，有效区域以像素
-//! 为单位，数字输出用 port-1）。
-//!
-//! 与 C++ 的差异：删去重复发送的 triggerEvent update；曝光值按原值输出（C++ 的 `Get<int>` 截断小数）。
+//! 会修改设备上的触发源、曝光、显示名、有效区域与数字输出，触发扫描时短暂启动设备、随后停止。只适用于 Gocator
+//! 传感器，SmartCam 的参数路径不同。
 
 mod common;
 
@@ -88,7 +84,7 @@ async fn main() -> common::Result {
     Ok(())
 }
 
-/// 开启数字输出，没有输出设备时加入第一个可用设备，把 port-0 的触发事件设为软件，再触发脉冲。
+/// 开启数字输出，输出设备列表为空时加入第一个可用设备，把 port-0 的触发事件设为软件，再触发脉冲。
 async fn configure_digital_output(client: &Client) -> common::Result {
     println!("Enabling Digital Output...");
     let payload = r#"{"enabled":true}"#.parse::<Value>()?;
@@ -129,7 +125,7 @@ async fn configure_digital_output(client: &Client) -> common::Result {
         .ok_or_else(|| format!("unknown digital output trigger event {event}"))?;
     println!("Digital output trigger event: {name}");
 
-    // 以下三步与 C++ 一样失败时只打印错误、继续执行：例如脉冲要求设备正在扫描，而这时设备已停止。
+    // 演示用途，以下三步失败时只打印错误、继续执行：例如脉冲要求设备正在扫描，而这时设备已停止。
     let trigger_path = format!("{DIGITAL_OUTPUT_PORT_PATH}/commands/trigger");
     // target：定时脉冲的时间（µs）或编码器位置（mm）；value：true 为高电平。
     println!("\nTriggering single non-scheduled pulse...");

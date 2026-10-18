@@ -16,28 +16,28 @@ use tokio::time::timeout;
 use crate::error::{DisconnectReason, Error, Result};
 use crate::frame::{FrameError, FrameReader};
 
-/// 写超时：与服务端的 10 s 写超时对称（协议假设 C1）。按每块 [`WRITE_CHUNK`] 计，即 10 s 内毫无进展才算超时，
-/// 大文件上传只要求每块在 10 s 内写出。超时或只写出半帧后连接不再可用，由调用方拆掉。
+/// 写超时，与服务端的 10 s 写超时对称（见[协议假设 C1](crate::docs::assumptions)）。每块 [`WRITE_CHUNK`] 单独
+/// 计时，大文件上传只要求每块在 10 s 内写出。超时或只写出半帧后连接已不可用，由调用方断开。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 写出的分块，写超时按块计。
 const WRITE_CHUNK: usize = 64 * 1024;
 
-/// keepalive：空闲 30 s 后每 10 s 探测一次。只等通知或流数据的连接没有写出，断电的设备只能靠它发现。
+/// keepalive：空闲 30 s 后每 10 s 探测一次。只等通知或流数据的连接从不写出，断电的设备只能靠它发现。
 const KEEPALIVE: TcpKeepalive = TcpKeepalive::new()
     .with_time(Duration::from_secs(30))
     .with_interval(Duration::from_secs(10));
 
-/// 一帧的长度上限：64 位 1 GiB、32 位 256 MiB（GDP 消息不超过它是协议假设 G2）。长度字段在分配之前与它比较，坏帧
-/// 不会让进程分配巨量内存。
+/// 一帧的长度上限：64 位 1 GiB、32 位 256 MiB（GDP 消息不超过它是[协议假设 G2](crate::docs::assumptions)）。
+/// 长度字段在分配之前与它比较，坏帧不会让进程分配巨量内存。
 pub(crate) const MAX_FRAME: u32 = if usize::BITS >= 64 {
     1 << 30
 } else {
     256 << 20
 };
 
-/// 建立 TCP 连接（超时 `limit`）：`TCP_NODELAY`（请求是小帧，SDK 从不设置）与 keepalive；读不设超时，写超时见
-/// [`write_all`]。端口 0 报 `InvalidArgument`（C++ 直接把 0 交给 socket）。
+/// 建立 TCP 连接（超时 `limit`）：`TCP_NODELAY`（请求是小帧，立即发出，不等 Nagle 合并）与 keepalive；读不设
+/// 超时，写超时见 [`write_all`]。端口 0 不是有效的目标端口，报 `InvalidArgument`。
 pub(crate) async fn connect(addr: SocketAddr, limit: Duration) -> Result<TcpStream> {
     if addr.port() == 0 {
         return Err(Error::InvalidArgument(format!("port of {addr} is 0")));
@@ -55,7 +55,7 @@ pub(crate) async fn connect(addr: SocketAddr, limit: Duration) -> Result<TcpStre
         .map_err(|source| Error::Connect { addr, source })
 }
 
-/// 整帧写出，每块 [`WRITE_CHUNK`] 带 10 s 超时（tokio 的 socket 没有 `SO_SNDTIMEO`），超时报 `TimedOut`。
+/// 整帧写出，每块 [`WRITE_CHUNK`] 带 10 s 超时（tokio 的 socket 不支持 `SO_SNDTIMEO`），超时报 `TimedOut`。
 pub(crate) async fn write_all<W: AsyncWrite + Unpin>(
     writer: &mut W,
     frame: &[u8],
@@ -68,7 +68,7 @@ pub(crate) async fn write_all<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// 读下一帧。`idle` 是连续没有收到任何字节的时长上限（`Duration::MAX` 即不限），超时报 `Io(TimedOut)`；帧边界上的
+/// 读下一帧。`idle` 是连续收不到任何字节的时长上限（`Duration::MAX` 即不限），超时报 `Io(TimedOut)`；帧边界上的
 /// EOF 为 `Ok(None)`，帧中途 EOF 报 `Io(UnexpectedEof)`。
 pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
@@ -95,8 +95,8 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
 /// 读任务与句柄共享的连接状态。
 ///
 /// 持有连接的句柄（`Connection`、`StreamHandle`、`gdp::Client`）Drop 时 [`close`](Self::close)：记下原因、shutdown
-/// （对端立即收到 FIN，不等别处释放写半边）并中止读任务，读任务里的半个 socket 随之释放，所以 Drop 从不阻塞、不留
-/// 任务，读任务卡在半帧中时也一样。读任务自己结束时用 [`finish`](Self::finish) 记下原因，句柄之后的调用都报这个原因。
+/// （对端立即收到 FIN，不等别处释放写半边）并中止读任务，读任务持有的读半边随之释放。所以 Drop 从不阻塞，也不会
+/// 留下仍在运行的读任务，读任务卡在半帧中时也一样。读任务自己结束时用 [`finish`](Self::finish) 记下原因，句柄之后的调用都报这个原因。
 #[derive(Debug)]
 pub(crate) struct Link {
     /// 同一个 socket 的另一个句柄，只用来 shutdown：tokio 的读写两半由读任务与连接的其他部分持有，这里不碰它们。
@@ -146,7 +146,7 @@ impl Link {
     }
 }
 
-/// 取锁并忽略中毒：临界区内不调用用户代码、不跨 await，也没有会 panic 的操作，数据不会处于半更新状态。
+/// 取锁并忽略中毒：临界区内不调用用户代码、不跨 await，也不做会 panic 的操作，数据不会处于半更新状态。
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

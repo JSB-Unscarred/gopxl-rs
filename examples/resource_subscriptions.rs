@@ -16,7 +16,6 @@ use std::thread;
 use std::time::Duration;
 
 use common::{ENGINE_ID, ENGINE_PATH, SENSOR_PATH};
-use gopxl::Value;
 use gopxl::resource::rel;
 
 /// 启停之后等待通知到达的时间（C++ 的 `kThread_Sleep(500'000)`）。
@@ -32,7 +31,7 @@ fn main() -> common::Result {
     system_res.subscribe()?;
     println!("IsSubscribed: {}", system_res.is_subscribed());
 
-    let run_state = system_res.get("/runState", Value::as_i64)?;
+    let run_state = system_res.get::<i64>("/runState")?;
     println!("Initial runState: {run_state}");
     println!("HasRemoteChanges: {}", system_res.has_remote_changes());
 
@@ -46,7 +45,7 @@ fn main() -> common::Result {
     );
 
     // 缓存已过期，这次读服务端。
-    let run_state = system_res.get("/runState", Value::as_i64)?;
+    let run_state = system_res.get::<i64>("/runState")?;
     println!("Updated runState: {run_state}");
     println!(
         "HasRemoteChanges after re-read: {}",
@@ -100,12 +99,12 @@ fn main() -> common::Result {
     println!("\n=== Caching Behavior ===");
     let mut sys_info = system.resource("/system/info");
     println!("First read (server round-trip)...");
-    println!("  appId: {}", sys_info.get("/appId", Value::as_str)?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
     println!("Second read (from cache)...");
-    println!("  appId: {}", sys_info.get("/appId", Value::as_str)?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
     println!("After InvalidateCache (server round-trip)...");
     sys_info.invalidate();
-    println!("  appId: {}", sys_info.get("/appId", Value::as_str)?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
 
     // 断开（C++ 的 `Disconnect`）之前取消订阅；未订阅时什么也不做。
     sensor.unsubscribe();

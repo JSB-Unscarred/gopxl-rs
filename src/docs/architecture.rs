@@ -11,7 +11,9 @@
 //!   （[`discovery`](crate::discovery)）与 schema 校验（[`schema`](crate::schema)）是纯函数或纯数据结构，不做 I/O、
 //!   不起线程，直接用字节测试。解码输入来自网络的文件以
 //!   `#![deny(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used, clippy::panic)]` 开头（子模块继承），
-//!   读取都经过 `bytes::Buf` 的 `try_get_*`，坏输入只得到 `Err`；
+//!   读取都经过 `bytes::Buf` 的 `try_get_*`，坏输入只得到 `Err`。`Value` 实现 serde 的 `Serialize` / `Deserialize`，
+//!   `&Value` 实现 `Deserializer`：载荷按需反序列化成调用方自己的类型，类型化模型由调用方按自己的固件版本定义；
+//!   线上 MessagePack 仍手写，与 C++ SDK 逐字节一致；
 //! - 连接：每种连接类型读写自己的 socket，把字节交给编解码层，相当于 FFI 封装中“方法直接调用 `sys`”。
 //!   控制通道的主连接（[`Client`](crate::control::Client)）、流连接（[`StreamHandle`](crate::control::StreamHandle)）、
 //!   文件传输连接（[`Handle::transfer`](crate::control::Handle::transfer)），GDP 连接
@@ -88,6 +90,8 @@
 //! - [`msgpack::EncodeError`](crate::value::msgpack::EncodeError)：长度超过 `u32::MAX`；
 //! - [`msgpack::DecodeError`](crate::value::msgpack::DecodeError)：消息体不是一条完整、合法的 MessagePack 文档；
 //! - `serde_json::Error`：`str::parse::<Value>()` 的 JSON 文本不合法；
+//! - `serde::de::value::Error`：`T::deserialize(&value)` 的类型不符、整数越界或结构体缺字段，只带一句说明；
+//!   `Resource::get` 把它折进 `Error::Payload` 的 `reason`；
 //! - [`FrameError`](crate::frame::FrameError)：读取失败、帧中途 EOF，或长度字段越界；字节流已错位，连接只能关闭。
 //!   帧边界上的 EOF 是 `Ok(None)`，非阻塞 socket 的 `WouldBlock` 不丢失已读字节；
 //! - [`control::InboundError`](crate::control::InboundError)：服务端从不产生的帧（carrier 头不符、消息体不是
@@ -104,7 +108,8 @@
 //! - [`Error`](crate::Error)：连接层与门面的错误。`Connect`（建立连接失败）、`Timeout`（应答未到，槽位成为墓碑，
 //!   连接照常可用）、`Disconnected`（携带上面的原因，只能重连）、`Request`（`status` 不是 OK，携带完整响应；`status`
 //!   为 OK 时 `payload.errors` 不升级为错误，与 SDK 一致）、`Payload`（`System`、`Resource::get` 或
-//!   `create_child` 要读取的字段缺失或类型不对）、`InvalidArgument`（尚未写出任何字节）、`Validation`（资源开启了
+//!   `create_child` 要读取的字段缺失或无法反序列化，`reason` 是 `"missing"` 或 serde 的说明）、`InvalidArgument`
+//!   （尚未写出任何字节）、`Validation`（资源开启了
 //!   校验，补丁中的值不符合 schema，请求没有发出）；
 //! - [`gdp::RecvError`](crate::gdp::RecvError)：`Timeout` 没有收到消息，`Incomplete` 数据集未结束（已收到的保留），
 //!   `Disconnected`。信封或 CAS 坏掉的 GDP 消息由读线程丢弃，不报错；

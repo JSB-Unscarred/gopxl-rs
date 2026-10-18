@@ -58,7 +58,7 @@ fn main() -> common::Result {
     let files = job_files.children(rel::ITEM)?;
     println!("Saved jobs ({}):", files.len());
     for mut file in files {
-        let name = file.get("/jobName", Value::as_str)?.to_owned();
+        let name = file.get::<String>("/jobName")?;
         println!("  {name} ({})", file.path());
     }
 
@@ -99,7 +99,7 @@ fn align(system: &System, scanner: &Resource) -> common::Result {
     let state = loop {
         thread::sleep(Duration::from_secs(1));
         alignment.invalidate();
-        let state = alignment.get("/alignState", Value::as_i64)?;
+        let state = alignment.get::<i64>("/alignState")?;
         if state != ALIGNING {
             break state;
         }
@@ -114,7 +114,7 @@ fn align(system: &System, scanner: &Resource) -> common::Result {
 
     let mut calibration = system.resource(format!("{SENSOR_PATH}/transform"));
     println!("Alignment transform: {{");
-    let mut number = |pointer: &str| calibration.get(pointer, Value::as_f64);
+    let mut number = |pointer: &str| calibration.get::<f64>(pointer);
     println!("  X angle:  {},", number("/xAngle")?);
     println!("  X offset: {},", number("/xOffset")?);
     println!("  Y angle:  {},", number("/yAngle")?);

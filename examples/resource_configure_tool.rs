@@ -36,7 +36,7 @@ fn main() -> common::Result {
     tool.set("/extId", TOOL_ID)?;
 
     // 上面的 update 使缓存过期，这里重新读取工具。
-    let use_region = tool.get("/parameters/UseRegion", Value::as_bool)?;
+    let use_region = tool.get::<bool>("/parameters/UseRegion")?;
     if use_region {
         println!("Tool region already enabled.");
     } else {
@@ -65,7 +65,7 @@ fn main() -> common::Result {
     // 给工具 1 s 处理扫描数据、算出测量值；与 C++ 相同，读不到时只提示。
     thread::sleep(Duration::from_secs(1));
     let mut metrics = tool.child("metrics");
-    match metrics.get("/outputsByExtId/X/value", Some) {
+    match metrics.get::<Value>("/outputsByExtId/X/value") {
         Ok(value) => println!("Measurement value: {value}"),
         Err(e) => println!("Note: Could not read measurement value ({e})"),
     }

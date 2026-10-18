@@ -70,7 +70,7 @@ impl System {
 
     /// 运行状态：`read /system` 的 `runState`，对应 C++ 的 `RunningState`。
     pub fn running_state(&self) -> Result<RunState> {
-        Ok(match self.res("/system").get("/runState", Value::as_i64)? {
+        Ok(match self.res("/system").get::<i64>("/runState")? {
             0 => RunState::Ready,
             1 => RunState::Running,
             2 => RunState::Conflict,
@@ -86,15 +86,13 @@ impl System {
 
     /// 快速编辑是否开启：`read /system` 的 `quickEditEnabled`，对应 C++ 的 `QuickEditEnabled`。
     pub fn quick_edit_enabled(&self) -> Result<bool> {
-        self.res("/system").get("/quickEditEnabled", Value::as_bool)
+        self.res("/system").get("/quickEditEnabled")
     }
 
     /// GDP 端口：`read /controls/gocator` 的 `serverPort`，对应 C++ 的 `GdpPort`。不在 `u16` 内时报 `Payload`
     /// （C++ 截断为 `k16u`）。
     pub fn gdp_port(&self) -> Result<u16> {
-        self.res("/controls/gocator").get("/serverPort", |port| {
-            port.as_i64().and_then(|port| u16::try_from(port).ok())
-        })
+        self.res("/controls/gocator").get("/serverPort")
     }
 
     /// 序列号为 `serial` 的传感器的资源路径，找不到时为 `None`，对应 C++ 的 `SensorPath`（找不到时返回 `""`）。
@@ -111,7 +109,7 @@ impl System {
                     .res(&format!("{scanner}/sensors"))
                     .child_paths(rel::ITEM)?
                 {
-                    if self.res(&sensor).get("/serialNumber", Value::as_str)? == serial {
+                    if self.res(&sensor).get::<&str>("/serialNumber")? == serial {
                         return Ok(Some(sensor));
                     }
                 }

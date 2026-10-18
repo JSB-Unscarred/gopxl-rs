@@ -6,6 +6,10 @@
 //!   删除数组元素时后面的元素前移而不是留下 null。
 //!
 //! 对象用 `BTreeMap`：键按字节序排列，与 nlohmann 的 `std::map` 相同，编码时不用排序就得到 C++ SDK 的字节。
+//!
+//! serde：`Value` 实现 `Serialize` 与 `Deserialize`，`&Value` 实现 `Deserializer`，载荷按需反序列化成调用方自己的
+//! 类型（`T::deserialize(&value)`，对应 nlohmann 的 `get<T>()`），`Value` 也能作为别的类型的字段。线上的 MessagePack
+//! 仍由 [`msgpack`] 手写，与 C++ SDK 逐字节一致。
 
 pub mod msgpack;
 
@@ -16,11 +20,36 @@ use std::ops::Index;
 use std::str::FromStr;
 
 use bytes::Bytes;
+use serde::de::value::{
+    BorrowedStrDeserializer, MapAccessDeserializer, MapDeserializer, SeqDeserializer,
+};
+use serde::de::{self, Deserializer, IntoDeserializer, Visitor};
+use serde::{Deserialize, Serialize, Serializer, forward_to_deserialize_any};
 
 /// 一个 MessagePack / JSON 值。
 ///
 /// 同一个数只有一种表示：能放进 `i64` 的整数一律是 [`Value::Int`]，[`Value::UInt`] 只用于大于 `i64::MAX` 的值
 /// （metrics 的计数器），所以 `PartialEq` 可以直接 derive。解码、JSON 解析与 `From<u64>` 都遵守这条规则。
+///
+/// 载荷反序列化成自己的类型（`&Value` 实现 [`serde::Deserializer`]，字符串与字节可以借用）：
+///
+/// ```
+/// use gopxl::Value;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// #[serde(rename_all = "camelCase")]
+/// struct Sensor<'a> {
+///     display_name: &'a str,
+///     serial_number: Option<u64>,
+/// }
+///
+/// let value: Value = r#"{"displayName":"Main","serialNumber":null,"extra":1}"#.parse()?;
+/// let sensor = Sensor::deserialize(&value)?;
+/// assert_eq!(sensor.display_name, "Main");
+/// assert_eq!(sensor.serial_number, None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {
     /// `null`（MessagePack 的 nil）。
@@ -295,29 +324,33 @@ impl From<u64> for Value {
     }
 }
 
-/// JSON 文本，对应 `GoJson::ToString`；`{:#}` 输出缩进格式。经 `serde_json` 输出，每次复制一遍树（`Bin` 除外），
-/// 只用于日志与调试。
+/// JSON 文本，对应 `GoJson::ToString`；`{:#}` 输出缩进格式。经 `serde_json` 输出，只用于日志与调试。
 ///
-/// JSON 无法表示的值：`Bin` 输出为字符串 `"<bin N bytes>"`，免得打印归档时输出几百 MB；NaN 与无穷输出为 `null`
-/// （与 nlohmann 相同）。
+/// JSON 无法表示的值：`Bin` 输出为字符串 `"<bin N bytes>"`（[`Serialize`] 则输出字节），免得打印归档时输出几百 MB；
+/// NaN 与无穷输出为 `null`（与 nlohmann 相同）。
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        to_json(self).fmt(f)
+        let text = if f.alternate() {
+            serde_json::to_string_pretty(&Text(self))
+        } else {
+            serde_json::to_string(&Text(self))
+        };
+        // 键都是字符串，serde_json 不会拒绝。
+        f.write_str(&text.map_err(|_| fmt::Error)?)
     }
 }
 
-/// 转换为 `serde_json` 的值，规则见 `Display`。
-fn to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Nil => serde_json::Value::Null,
-        Value::Bool(v) => (*v).into(),
-        Value::Int(v) => (*v).into(),
-        Value::UInt(v) => (*v).into(),
-        Value::Float(v) => (*v).into(),
-        Value::Str(v) => v.as_str().into(),
-        Value::Bin(v) => format!("<bin {} bytes>", v.len()).into(),
-        Value::Array(items) => items.iter().map(to_json).collect(),
-        Value::Map(map) => map.iter().map(|(k, v)| (k.clone(), to_json(v))).collect(),
+/// `Display` 用的视图：`Bin` 换成占位字符串，容器逐层套上视图，其余与 `Value` 的 `Serialize` 相同。
+struct Text<'a>(&'a Value);
+
+impl Serialize for Text<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Bin(v) => serializer.collect_str(&format_args!("<bin {} bytes>", v.len())),
+            Value::Array(items) => serializer.collect_seq(items.iter().map(Text)),
+            Value::Map(map) => serializer.collect_map(map.iter().map(|(k, v)| (k, Text(v)))),
+            scalar => scalar.serialize(serializer),
+        }
     }
 }
 
@@ -328,24 +361,235 @@ impl FromStr for Value {
     type Err = serde_json::Error;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(text).map(from_json)
+        serde_json::from_str(text)
     }
 }
 
-/// 把 `serde_json` 的值转换过来，整数按 [`Value`] 的规则归一化。
-fn from_json(json: serde_json::Value) -> Value {
-    match json {
-        serde_json::Value::Null => Value::Nil,
-        serde_json::Value::Bool(v) => Value::Bool(v),
-        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-            (Some(v), _) => Value::Int(v),
-            (None, Some(v)) => Value::UInt(v),
-            (None, None) => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        },
-        serde_json::Value::String(v) => Value::Str(v),
-        serde_json::Value::Array(items) => Value::Array(items.into_iter().map(from_json).collect()),
-        serde_json::Value::Object(map) => {
-            Value::Map(map.into_iter().map(|(k, v)| (k, from_json(v))).collect())
+/// `Nil` 为 unit（JSON 的 `null`），`Bin` 为字节，其余按 serde 数据模型的同名类型。
+impl Serialize for Value {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Value::Nil => serializer.serialize_unit(),
+            Value::Bool(v) => serializer.serialize_bool(*v),
+            Value::Int(v) => serializer.serialize_i64(*v),
+            Value::UInt(v) => serializer.serialize_u64(*v),
+            Value::Float(v) => serializer.serialize_f64(*v),
+            Value::Str(v) => serializer.serialize_str(v),
+            Value::Bin(v) => serializer.serialize_bytes(v),
+            Value::Array(items) => items.serialize(serializer),
+            Value::Map(map) => map.serialize(serializer),
         }
+    }
+}
+
+/// 从任意 serde 数据模型构造，包括 JSON 文本（[`FromStr`]）与 `serde_json::Value`（`serde_json::json!` 的结果）：
+/// 整数按 [`Value`] 的规则归一化，字节为 `Bin`，`None` 与 unit 为 `Nil`。
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
+struct ValueVisitor;
+
+impl<'de> Visitor<'de> for ValueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON / MessagePack value")
+    }
+
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> {
+        Ok(Value::Int(v))
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
+        Ok(Value::Float(v))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::Str(v.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Value, E> {
+        Ok(Value::Str(v))
+    }
+
+    fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Value, E> {
+        Ok(Value::Bin(Bytes::copy_from_slice(v)))
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Value, E> {
+        Ok(Value::Bin(v.into()))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Nil)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Nil)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        Value::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut entries = Map::new();
+        while let Some((key, value)) = map.next_entry()? {
+            entries.insert(key, value);
+        }
+        Ok(Value::Map(entries))
+    }
+}
+
+impl<'de> IntoDeserializer<'de, de::value::Error> for &'de Value {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self {
+        self
+    }
+}
+
+/// 把 `Value` 反序列化成任意类型，对应 nlohmann 的 `get<T>()`：`Nil` 是 unit 与 `None`；整数经 serde 的范围检查，
+/// 越界报错而不截断；`Str`、`Bin` 与对象的键按借用交给访问者，`&str`、`&[u8]` 零拷贝；枚举接受字符串（单元变体）
+/// 与单键对象；元组与结构体要求数组的元素数正好。错误是 [`serde::de::value::Error`]，只带一句说明。
+impl<'de> Deserializer<'de> for &'de Value {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self {
+            Value::Nil => visitor.visit_unit(),
+            Value::Bool(v) => visitor.visit_bool(*v),
+            Value::Int(v) => visitor.visit_i64(*v),
+            Value::UInt(v) => visitor.visit_u64(*v),
+            Value::Float(v) => visitor.visit_f64(*v),
+            Value::Str(v) => visitor.visit_borrowed_str(v),
+            Value::Bin(v) => visitor.visit_borrowed_bytes(v),
+            Value::Array(items) => {
+                let mut seq = SeqDeserializer::new(items.iter());
+                let value = visitor.visit_seq(&mut seq)?;
+                seq.end()?;
+                Ok(value)
+            }
+            Value::Map(map) => {
+                let mut entries = MapDeserializer::new(borrowed_entries(map));
+                let value = visitor.visit_map(&mut entries)?;
+                entries.end()?;
+                Ok(value)
+            }
+        }
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if self.is_nil() {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        match self {
+            Value::Str(v) => visitor.visit_enum(BorrowedStrDeserializer::new(v)),
+            Value::Map(map) => visitor.visit_enum(MapAccessDeserializer::new(
+                MapDeserializer::new(borrowed_entries(map)),
+            )),
+            // 访问者自己报“类型不对、期望枚举”。
+            _ => self.deserialize_any(visitor),
+        }
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf unit
+        unit_struct seq tuple tuple_struct map struct identifier ignored_any
+    }
+}
+
+/// 对象的条目，键按借用交给 serde。
+fn borrowed_entries(
+    map: &Map,
+) -> impl Iterator<Item = (BorrowedStrDeserializer<'_, de::value::Error>, &Value)> {
+    map.iter()
+        .map(|(key, value)| (BorrowedStrDeserializer::new(key), value))
+}
+
+// serde 接入是自有约定（nlohmann 的 get<T>() 截断整数、复制字符串），无法与官方实现对照。
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    use super::Value;
+
+    // 约定：JSON 文本与 serde 数据模型按 Value 的规则归一化（能放进 i64 的为 Int，更大的为 UInt，-0 为 Float）；
+    // 反序列化时 Nil 是 None，整数越界、类型不符、元素数不对都报错而不截断，字符串与字节按借用读出；Display 把 Bin
+    // 换成占位、其余与 Serialize 经 serde_json 的输出相同。
+    #[test]
+    fn serde_follows_value_conventions() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Fields<'a> {
+            a: u8,
+            b: Option<u64>,
+            d: Option<i32>,
+            l: (i64, i64),
+            s: &'a str,
+        }
+
+        let text = r#"{"a":1,"b":18446744073709551615,"c":-0,"d":null,"l":[1,2],"s":"x"}"#;
+        let value: Value = text.parse().unwrap();
+        assert_eq!(value["a"], Value::Int(1));
+        assert_eq!(value["b"], Value::UInt(u64::MAX));
+        assert!(matches!(value["c"], Value::Float(f) if f.is_sign_negative()));
+
+        let fields = Fields::deserialize(&value).unwrap();
+        assert_eq!(
+            fields,
+            Fields {
+                a: 1,
+                b: Some(u64::MAX),
+                d: None,
+                l: (1, 2),
+                s: "x",
+            }
+        );
+        assert!(i8::deserialize(&value["b"]).is_err());
+        assert!(bool::deserialize(&value["a"]).is_err());
+        assert!(<(i64,)>::deserialize(&value["l"]).is_err());
+        assert_eq!(Value::deserialize(&value).unwrap(), value);
+
+        let bin = Value::from(vec![1_u8, 2, 3]);
+        assert_eq!(<&[u8]>::deserialize(&bin).unwrap(), [1, 2, 3]);
+        assert_eq!(bin.to_string(), r#""<bin 3 bytes>""#);
+        assert_eq!(serde_json::to_string(&value).unwrap(), value.to_string());
     }
 }

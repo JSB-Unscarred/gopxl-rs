@@ -52,7 +52,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoJson::ToString` | `impl Display for Value` | 紧凑 JSON，`{:#}` 为缩进格式；`Bin` 输出为 `"<bin N bytes>"` |
 | `GoJson::ToBinary` | `value::msgpack::encode(&Value, &mut Vec<u8>) -> Result<(), EncodeError>` | 与 nlohmann 3.8.0 逐字节一致；长度超过 `u32::MAX` 时报错 |
 | `GoJson::ParseMsgPack` | `value::msgpack::decode(&Bytes) -> Result<Value, DecodeError>` | `Bin` 是输入的零拷贝切片；嵌套上限 128 层 |
-| `GoJson::Get<T>`、`At` | `Value::pointer(&self, &str) -> Option<&Value>`；`Index<&str>`、`Index<usize>`（缺失时为 `&Value::Nil`）；`as_bool`、`as_i64`、`as_u64`、`as_f64`、`as_str`、`as_array`、`as_map` | 不修改文档；整数访问器不截断浮点数，`as_u64` 不回绕负数 |
+| `GoJson::Get<T>`、`At` | `Value::pointer(&self, &str) -> Option<&Value>`；`Index<&str>`、`Index<usize>`（缺失时为 `&Value::Nil`）；`as_bool`、`as_i64`、`as_u64`、`as_f64`、`as_str`、`as_array`、`as_map`；任意类型经 `T::deserialize(&value)`（`&Value` 实现 `serde::Deserializer`） | 不修改文档；整数访问器不截断浮点数，`as_u64` 不回绕负数；反序列化时整数越界报错（nlohmann 截断），`&str`、`&[u8]` 借用不复制 |
 | `GoJson::GetBinary` | `Value::as_bytes(&self) -> Option<&Bytes>` | 不复制 |
 | `GoJson::Set`、`Replace` | `Value::set(&mut self, &str, impl Into<Value>) -> Result<(), PointerError>` | 只自动创建对象；数组用已有下标或 `-` 追加；出错时文档不变 |
 | `GoJson::Remove` | `Value::remove(&mut self, &str) -> Option<Value>` | 数组元素前移，不留 null |
@@ -113,7 +113,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResource::SetTimeout`、`Timeout` | `Resource::set_timeout(Duration)`、`timeout()` | 默认 5 s |
 | `GoResource::SetExpandLevel`、`ExpandLevel` | `Resource::set_expand_level(i32)`、`expand_level()` | 设置时数据缓存失效，缓存总是按当前层级读到的 |
 | `GoResource::Data` | `Resource::data() -> Result<&Value>` | 缓存为空或过期时读服务端，读参数 `{expandLevel, includeSchema: false}`；同一连接上发出任一 `create` / `update` / `delete` / `call`（含文件传输）之后、订阅收到通知之后或连接断开之后，缓存过期（取代 C++ 的 `SetNonIdempotentRequestHandler` 与 `ResetConnectionState`）；C++ 的 `Cache`（总是重读）即 `invalidate()` 之后 `data()` |
-| `GoResource::GetBool`、`GetInt`、`GetInt64`、`GetFloat`、`GetDouble`、`GetString`、`GetObject`、`GetProp` | `Resource::get(&str, impl FnOnce(&Value) -> Option<T>) -> Result<T>`，例如 `get(ptr, Value::as_i64)`、`get(ptr, Some)` | 字段缺失或类型不对时为 `Error::Payload`（C++ 抛 `GoResourceError`）；整数不截断浮点数 |
+| `GoResource::GetBool`、`GetInt`、`GetInt64`、`GetFloat`、`GetDouble`、`GetString`、`GetObject`、`GetProp` | `Resource::get::<T: Deserialize>(&str) -> Result<T>`，例如 `get::<i64>(ptr)`、`get::<&str>(ptr)`、`get::<Value>(ptr)` 或 `#[derive(Deserialize)]` 的结构体 | 字段缺失或无法反序列化时为 `Error::Payload`，带原因（C++ 抛 `GoResourceError`）；整数不截断浮点数、越界报错 |
 | `GoResource::InvalidateCache` | `Resource::invalidate()` | 丢弃数据与 schema 缓存 |
 | `GoResource::HasRemoteChanges` | `Resource::has_remote_changes() -> bool` | 下一次 `data` 是否读服务端；从未读取时也为 `true` |
 | `GoResource::SetBool`、`SetInt`、`SetInt64`、`SetFloat`、`SetDouble`、`SetString`、`SetProp` | `Resource::set(&str, impl Into<Value>) -> Result<()>` | 只含这一个值的 `update`，立即发送 |
@@ -169,12 +169,12 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 
 | SDK 定义或协议 | Rust 定义 | 说明 |
 | --- | --- | --- |
-| `GoJson`（nlohmann::json 3.8.0）；.NET 的 `JObject` | `Value`：`Nil`、`Bool`、`Int(i64)`、`UInt(u64)`、`Float(f64)`、`Str`、`Bin(Bytes)`、`Array`、`Map` | 值语义，`Clone` 是深拷贝；能放进 `i64` 的整数一律是 `Int`，`UInt` 只用于更大的值；float32 解码时拓宽为 `f64` |
+| `GoJson`（nlohmann::json 3.8.0）；.NET 的 `JObject` | `Value`：`Nil`、`Bool`、`Int(i64)`、`UInt(u64)`、`Float(f64)`、`Str`、`Bin(Bytes)`、`Array`、`Map`；实现 `serde::Serialize` / `Deserialize`，`&Value` 实现 `serde::Deserializer` | 值语义，`Clone` 是深拷贝；能放进 `i64` 的整数一律是 `Int`，`UInt` 只用于更大的值；float32 解码时拓宽为 `f64`；`Nil` 对应 serde 的 unit / `None`，`Bin` 对应字节 |
 | nlohmann 对象（`std::map`） | `Map = BTreeMap<String, Value>` | 键按字节序，编码顺序与 C++ SDK 相同 |
 | nlohmann `binary_t` | `Value::Bin(Bytes)` | `From<Vec<u8>>` 得到 `Bin`，与 `GoJson::Set(path, std::vector<k8u>)` 相同 |
 | `GoJsonPointer` | `&str` | RFC 6901；与 `GoJsonPointer` 相同，缺少前导 `/` 时补上 |
 | `GoJsonIterator` | `as_array()` / `as_map()` 返回的切片与 `BTreeMap` 的迭代器 |  |
-| `GoJsonError` | `PointerError`、`value::msgpack::DecodeError`、`value::msgpack::EncodeError`、`serde_json::Error` | 读取返回 `Option`，不报错 |
+| `GoJsonError` | `PointerError`、`value::msgpack::DecodeError`、`value::msgpack::EncodeError`、`serde_json::Error`、`serde::de::value::Error`（`T::deserialize(&value)`） | 读取返回 `Option`，不报错 |
 | 控制通道消息体（carrier 类型 0xB000，MessagePack） | `value::msgpack` | 编码与 nlohmann 3.8.0 逐字节一致（最短整数、float64、键按字节序）；解码不依赖整数宽度与键序，ext 当作 `Bin` |
 | 长度前缀帧：carrier 帧、GDP 消息 | `frame::FrameReader`、`frame::FrameError`；`control::HEADER_LEN`（14）、`gdp::HEADER_LEN`（6） | 小端 `u32` 长度包含自身；先校验长度再精确分配；`WouldBlock` 不丢失已读字节 |
 | carrier 帧（`GoCtrlChannelV1`） | `Request::encode`、`Inbound::decode` | 客户端只收发 0xB000：服务端按请求的格式回复，C++ SDK 也只收 0xB000；与 C++ 一样不检查 `CarrierStatus` |
@@ -185,7 +185,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `kStatus`（.NET 的 `GoStatus`） | `control::Status(i32)` 与全部常量（含 −975 `OVERHEAT`） | 表外的值原样保留；.NET 的枚举没有 −975 |
 | `GoCtrlChannel::ReadErrorType` | `frame::FrameError`、`control::InboundError` |  |
 | `SetDisconnectHandler` 通知的断开（C++ 不给原因） | `control::DisconnectReason`：`Closed`、`Eof`、`Read`、`Write`、`Decode` | 所有挂起的请求以同一个 `Arc` 原因失败；流连接与 GDP 连接的断开也用它表示 |
-| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`Validation`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System`、`Resource::get` 或 `create_child` 要读取的字段缺失或类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）；`Validation` 见 `GoResourceValidationError` |
+| `GoChannelError`、`GoRequestError`（.NET 的 `GoChannelException`、`GoRequestException`） | `Error`：`Connect`、`Timeout`、`Disconnected`、`Request(Box<RequestError>)`、`Payload`、`Validation`、`InvalidArgument`；`RequestError` 携带方法、路径与完整的 `Response` | `Display` 带第一条 `payload.errors` 的说明；`status` 为 OK 时 `payload.errors` 不升级为错误（与 SDK 一致）；`Payload` 是 `System`、`Resource::get` 或 `create_child` 要读取的字段缺失或无法反序列化，`reason` 是 `"missing"` 或 serde 的说明（C++ 抛 `GoJsonError` / `GoResourceError`）；`Validation` 见 `GoResourceValidationError` |
 | `GoSystem::State` | `RunState`：`Ready`、`Running`、`Conflict`、`Other(i64)` | 0、1、2 与表外的值 |
 | `GoTransaction` | `control::Transaction` |  |
 | `GoNotificationHandler`、`NotificationCallback` 收到的通知 | `control::Notice`：`Event(Arc<Notification>)`、`Lagged(u64)` | 一条通知投递给多个订阅时共享；`Lagged` 是在此之前丢掉的条数 |
@@ -197,7 +197,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoResourceValidationError::Errors()` | `Vec<String>` | 每个关键字一条（`maximum 10`），同 C++ 的 `vector<string>` |
 | `GoRelationType` | `resource::rel`：`ITEM`、`SCANNER`、`SUB_TASK`、`CONTENT`、`COMMAND`、`ACTION` | `GoResource::DEFAULT_RELATION_TYPE` 即 `ITEM`；Rust 的方法显式传入 rel |
 | `GoResource::DEFAULT_TIMEOUT_MS`、`DEFAULT_EXPAND_LEVEL` | `Resource::new` 的默认值：5 s、0 |  |
-| `GoResourceError` | `Error::Payload`（`get` 的字段缺失或类型不对，`create_child` 的响应中找不到新路径） | C++ 的其余抛出点（资源已删除、缺少管理器、`EndUpdate` 不配对）在 Rust 中不存在 |
+| `GoResourceError` | `Error::Payload`（`get` 的字段缺失或无法反序列化，`create_child` 的响应中找不到新路径） | C++ 的其余抛出点（资源已删除、缺少管理器、`EndUpdate` 不配对）在 Rust 中不存在 |
 | `GoResourceValidationError` | `Error::Validation { path, pointer, issues }` | `Errors()` 即 `issues`，`pointer` 是补丁中不合格的值的位置 |
 | HAL 的 rel（数组、单个对象、`[]`、nil 或缺失） | `Resource::child_paths`、`children`、`command_names`、`action_names` 按条目列表读取 | 服务端只有一个引用时写出单个对象 |
 | `GoGdpMsg`；`MessageType` | `gdp::Message`；`gdp::Body` 的变体 | 未知类型为 `Body::Unknown(Bytes)`；`GoGdpSignal` 没有字段，即 `Body::Signal` |

@@ -41,13 +41,16 @@ pub enum Error {
     /// 服务端的 `status` 不是 OK。
     #[error(transparent)]
     Request(Box<RequestError>),
-    /// 响应成功，但载荷缺少要读取的字段，或字段类型不对（C++ 抛 `GoJsonError` / `GoResourceError`）。
-    #[error("{path}: response payload has no valid {field:?}")]
+    /// 响应成功，但载荷中要读取的字段缺失或无法反序列化（类型不对、整数越界、结构体缺字段；C++ 抛
+    /// `GoJsonError` / `GoResourceError`）。
+    #[error("{path}: payload field {field:?}: {reason}")]
     Payload {
         /// 请求的路径。
         path: String,
         /// 载荷中的字段名或 JSON Pointer。
         field: String,
+        /// `"missing"`，或 serde 的错误说明。
+        reason: String,
     },
     /// 资源开启了校验（[`Resource::set_validation`](crate::resource::Resource::set_validation)），补丁中 `pointer` 处的值不符合
     /// schema，请求没有发出，对应 C++ 的 `GoResourceValidationError`。

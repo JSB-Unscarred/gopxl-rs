@@ -29,7 +29,7 @@ fn main() -> common::Result {
     section("Configuration 1: Update trigger source.");
     println!("Setting scanner trigger source to \"Software\"...");
     scanner.set(TRIGGER_SOURCE_PATH, TRIGGER_MODE_SOFTWARE)?;
-    let source = scanner.get(TRIGGER_SOURCE_PATH, Value::as_i64)?;
+    let source = scanner.get::<i64>(TRIGGER_SOURCE_PATH)?;
     println!("Trigger source: {source}");
 
     system.start()?;
@@ -44,7 +44,7 @@ fn main() -> common::Result {
     patch.set(EXPOSURE_MODE_PATH, EXPOSURE_MODE_SINGLE)?;
     patch.set(SINGLE_EXPOSURE_PATH, 1200)?;
     sensor.update(patch)?;
-    let exposure = sensor.get(SINGLE_EXPOSURE_PATH, Some)?;
+    let exposure = sensor.get::<Value>(SINGLE_EXPOSURE_PATH)?;
     println!("Exposure value: {exposure}");
 
     section("Configuration 3: Update multiple exposures.");
@@ -56,19 +56,19 @@ fn main() -> common::Result {
         [1080, 2010, 5040].map(Value::from).to_vec(),
     )?;
     sensor.update(patch)?;
-    let exposures = sensor.get(MULTI_EXPOSURE_PATH, Some)?;
+    let exposures = sensor.get::<Value>(MULTI_EXPOSURE_PATH)?;
     println!("Multi-exposure values: {exposures}");
 
     section("Configuration 4: Update sensor name.");
     println!("Setting display name...");
     sensor.set("/displayName", "Main-Sensor-Change")?;
-    let name = sensor.get("/displayName", Value::as_str)?;
+    let name = sensor.get::<&str>("/displayName")?;
     println!("Display name: {name}");
 
     section("Configuration 5: Change the active area.");
     println!("Updating active area...");
     sensor.set(&format!("{ACTIVE_AREA_PATH}/width"), 3.5)?;
-    let area = sensor.get(ACTIVE_AREA_PATH, Some)?;
+    let area = sensor.get::<Value>(ACTIVE_AREA_PATH)?;
     println!("Active area: {area}");
 
     section("Configuration 6: Enable, trigger, and configure Digital Output.");
@@ -76,7 +76,7 @@ fn main() -> common::Result {
 
     section("Configuration 7: Read network configuration.");
     let mut ip_config = system.resource(common::IP_CONFIG_PATH);
-    let interfaces = ip_config.get("/interfaces", Some)?;
+    let interfaces = ip_config.get::<Value>("/interfaces")?;
     println!("Network configurations: {interfaces}.");
     Ok(())
 }
@@ -92,7 +92,7 @@ fn configure_digital_output(system: &System) -> common::Result {
     if devices.child_paths(rel::ITEM)?.is_empty() {
         println!("\nAdding device to Digital Output...");
         let mut available = digital_output.child("availableDevices");
-        let device = available.get("/devices/0", Some)?.clone();
+        let device = available.get::<Value>("/devices/0")?;
         devices.create_child(device)?;
     }
 
@@ -103,7 +103,7 @@ fn configure_digital_output(system: &System) -> common::Result {
 
     println!("Setting digital output trigger event to Software...");
     port.set(DIO_TRIGGER_EVENT_PATH, DIO_TRIGGER_SOFTWARE)?;
-    let event = port.get(DIO_TRIGGER_EVENT_PATH, Value::as_i64)?;
+    let event = port.get::<i64>(DIO_TRIGGER_EVENT_PATH)?;
     let name = trigger_event_name(event)
         .ok_or_else(|| format!("unknown digital output trigger event {event}"))?;
     println!("Digital output trigger event: {name}");

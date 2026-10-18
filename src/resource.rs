@@ -9,6 +9,8 @@ use std::fmt;
 use std::slice;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::control::{Handle, Method, Request, Status, Subscription, Transaction};
 use crate::error::{Error, Result};
 use crate::schema;
@@ -130,19 +132,20 @@ impl Resource {
         Ok(self.data.insert(data))
     }
 
-    /// `pointer` 处的字段经 `convert` 转换的结果，对应 C++ 的 `GetBool`、`GetInt`、`GetDouble`、`GetString`、`GetProp`
-    /// 等：例如 `get("/parameters/x", Value::as_i64)`，原样取值用 `Some`。字段缺失或 `convert` 返回 `None`（类型不对）
-    /// 时报 `Payload`（C++ 抛 `GoResourceError`）。
-    pub fn get<'a, T>(
-        &'a mut self,
-        pointer: &str,
-        convert: impl FnOnce(&'a Value) -> Option<T>,
-    ) -> Result<T> {
+    /// `pointer` 处的字段反序列化为 `T`（`&Value` 实现 `serde::Deserializer`），对应 C++ 的 `GetBool`、`GetInt`、
+    /// `GetDouble`、`GetString`、`GetProp` 等：`get::<i64>("/parameters/x")`、`get::<&str>(..)` 借用缓存、
+    /// `get::<Value>(..)` 原样取值，也可以是 `#[derive(Deserialize)]` 的结构体。字段缺失或无法反序列化（类型不对、
+    /// 整数越界、结构体缺字段）时报 `Payload`（C++ 抛 `GoResourceError`）。
+    pub fn get<'a, T: Deserialize<'a>>(&'a mut self, pointer: &str) -> Result<T> {
         let path = self.path.clone();
-        let value = self.data()?.pointer(pointer).and_then(convert);
-        value.ok_or_else(|| Error::Payload {
+        let value = match self.data()?.pointer(pointer) {
+            Some(value) => T::deserialize(value).map_err(|e| e.to_string()),
+            None => Err("missing".to_owned()),
+        };
+        value.map_err(|reason| Error::Payload {
             path,
             field: pointer.to_owned(),
+            reason,
         })
     }
 
@@ -271,6 +274,7 @@ impl Resource {
             .ok_or_else(|| Error::Payload {
                 path: self.path.clone(),
                 field: "path".to_owned(),
+                reason: "missing".to_owned(),
             })?;
         Ok(self.derive(path.to_owned()))
     }

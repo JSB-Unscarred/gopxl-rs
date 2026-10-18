@@ -13,10 +13,16 @@ bytes = "1.11"
 # link-local：Windows 上默认过滤 169.254.x.x 的网卡，直连设备、没有 DHCP 时就发不出 Discover。
 if-addrs = { version = "0.15.0", features = ["link-local"] }
 regex-lite = "0.1.9"
+# Value 实现 Serialize / Deserialize，&Value 实现 Deserializer：载荷按需反序列化成调用方自己的类型。
+serde = "1.0.228"
 # float_roundtrip：JSON 文本中的浮点数正确舍入，与 GoJson 用的 strtod 逐位相同。
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 socket2 = "0.6.5"
 thiserror = "2.0.18"
+
+[dev-dependencies]
+# derive：文档与测试里类型化读取的示例结构体。
+serde = { version = "1.0.228", features = ["derive"] }
 
 [lints.rust]
 # 线上协议全部用安全 Rust 实现，unsafe 只出现在依赖中。

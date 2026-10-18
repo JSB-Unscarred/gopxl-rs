@@ -15,9 +15,9 @@
 //!   `&Value` 实现 `Deserializer`：载荷按需反序列化成调用方自己的类型，类型化模型由调用方按自己的固件版本定义；
 //!   线上 MessagePack 仍手写，与 C++ SDK 逐字节一致；
 //! - 连接：每种连接类型读写自己的 socket，把字节交给编解码层，相当于 FFI 封装中“方法直接调用 `sys`”。
-//!   控制通道的主连接（[`Client`](crate::control::Client)）、流连接（[`StreamHandle`](crate::control::StreamHandle)）、
-//!   文件传输连接（[`Handle::transfer`](crate::control::Handle::transfer)），GDP 连接
-//!   （[`GdpClient`](crate::gdp::GdpClient)）与发现（[`discover`](crate::discovery::discover)）；
+//!   控制通道的主连接（[`Connection`](crate::control::Connection)）、流连接（[`StreamHandle`](crate::control::StreamHandle)）、
+//!   文件传输连接（[`Client::transfer`](crate::control::Client::transfer)），GDP 连接
+//!   （[`gdp::Client`](crate::gdp::Client)）与发现（[`discover`](crate::discovery::discover)）；
 //! - 门面：[`System`](crate::System) 对应 C++ 的 `GoSystem`，只包装它已有的几个便捷操作。其余资源与官方示例一样
 //!   经原始动词与 `Value` 访问，不建类型化模型：资源由服务端在运行时定义，字段随版本变化；
 //! - 资源层：[`Resource`](crate::resource::Resource) 对应 C++ 的 `GoResource`，在原始动词之上缓存读结果、按 schema
@@ -45,11 +45,11 @@
 //!   在 Linux 上随即退出，Windows 上 shutdown 唤不醒阻塞的 recv，要等对端关闭连接（控制通道的服务端读到 EOF 即
 //!   关闭）或再发数据（GDP 服务端不读，等下一条数据）才退出并释放 socket。读线程退出前记下断开原因，句柄之后的
 //!   调用都报这个原因。
-//! - [`Client`](crate::control::Client) 是主连接的唯一 owner，不 `Clone`，Drop 即断开。
-//!   [`Handle`](crate::control::Handle) 是 owned 句柄（`Arc`），可以移到别的线程、存进别的对象，但不让连接存活：
+//! - [`Connection`](crate::control::Connection) 是主连接的唯一 owner，不 `Clone`，Drop 即断开。
+//!   [`Client`](crate::control::Client) 是 owned 句柄（`Arc`），可以移到别的线程、存进别的对象，但不让连接存活：
 //!   `Client` Drop 之后经它发出的请求立即以 `Disconnected(Closed)` 失败。
-//! - [`System`](crate::System) 唯一拥有一个 `Client`，Drop 即断开；它的方法只借用这个连接。
-//! - [`Resource`](crate::resource::Resource) 由调用方唯一拥有：持有一个 `Handle`（不让连接存活）、自己的数据与 schema
+//! - [`System`](crate::System) 唯一拥有一个 `Connection`，Drop 即断开；它的方法只借用这个连接。
+//! - [`Resource`](crate::resource::Resource) 由调用方唯一拥有：持有一个 `Client`（不让连接存活）、自己的数据与 schema
 //!   缓存和可选的 `Subscription`，方法取 `&mut self`。没有 C++ 的 `GoResourceManager` 注册表，同一路径的两个
 //!   `Resource` 各有各的缓存，`children` 等得到的子资源同样是独立的值。缓存在访问时判断是否过期，不需要线程或回调：
 //!   连接的写计数变了（`create` / `update` / `delete` / `call` 在写锁内加一，文件传输在完成后加一；资源记下读取之前的
@@ -58,16 +58,16 @@
 //! - [`Transaction`](crate::control::Transaction) 拥有一个已写出请求的应答接收端，丢弃即 fire-and-forget。
 //! - [`Subscription`](crate::control::Subscription) 拥有自己的通知队列；读线程只持队列的 `Weak`。Drop 时注销队列，
 //!   没有别的本地订阅用同一表达式时写出 `unSub`，不等应答。
-//! - [`StreamHandle`](crate::control::StreamHandle) 与 [`GdpClient`](crate::gdp::GdpClient) 各拥有一条连接与它的读线程；
+//! - [`StreamHandle`](crate::control::StreamHandle) 与 [`gdp::Client`](crate::gdp::Client) 各拥有一条连接与它的读线程；
 //!   文件传输连接只在 `transfer` 调用期间存在。
 //!
 //! ## 线程与锁
 //!
-//! - 每个 `Client` 一个读线程 `gopxl-control`，每个流一个 `gopxl-stream`，每个 `GdpClient` 一个 `gopxl-gdp`；请求、
+//! - 每个 `Connection` 一个读线程 `gopxl-control`，每个流一个 `gopxl-stream`，每个 `gdp::Client` 一个 `gopxl-gdp`；请求、
 //!   文件传输与发现在调用方线程上执行。没有回调：通知由调用方拉取，断开由各阻塞调用以 `Disconnected` 报告。
 //! - 读线程从不执行用户代码，也从不等待主连接上的消费者：订阅队列满了丢最老的。流与 GDP 的读线程在通道满时阻塞，
 //!   背压经 TCP 传到服务端。
-//! - 主连接两把锁，顺序固定为写锁 → 分派锁：写锁覆盖登记槽位与整帧写出，槽位顺序因此等于线上顺序；读线程只取
+//! - 主连接两把锁，顺序固定为写锁 → 分派锁：写锁里是 socket 的写句柄，覆盖登记槽位与整帧写出，槽位顺序因此等于线上顺序；读线程只取
 //!   分派锁，写出被阻塞时照常读。临界区内不调用用户代码。
 //!
 //! ## 阻塞
@@ -96,12 +96,12 @@
 //!   帧边界上的 EOF 是 `Ok(None)`，非阻塞 socket 的 `WouldBlock` 不丢失已读字节；
 //! - [`control::InboundError`](crate::control::InboundError)：服务端从不产生的帧（carrier 头不符、消息体不是
 //!   MessagePack 对象、必需字段缺失或类型错误），连接应当关闭；未知的 `type` 不是错误，而是 `Inbound::Other`；
-//! - [`gdp::GdpError`](crate::gdp::GdpError)：`Truncated`（数据短于字段声明）或 `Malformed`（长度字段与外层不符）。
+//! - [`gdp::Error`](crate::gdp::Error)：`Truncated`（数据短于字段声明）或 `Malformed`（长度字段与外层不符）。
 //!   信封或 CAS 坏掉时 `decode_message` 返回 `Err`；CAS 之后的部分坏掉时消息仍然返回，`body` 为
 //!   `Body::Invalid`，`cas.is_last_msg` 照样能结束数据集；
 //! - [`discovery::DiscoveryError`](crate::discovery::DiscoveryError)：丢弃这条数据报、继续接收；`Command` 是其他
 //!   客户端（或自己）发出的命令，不是错误报文。Announce 的单个字段缺失或类型不对时取默认值，不报错；
-//! - [`control::DisconnectReason`](crate::control::DisconnectReason)：连接必须拆掉，所有挂起的请求以同一个
+//! - [`DisconnectReason`](crate::DisconnectReason)：连接必须拆掉，所有挂起的请求以同一个
 //!   `Arc` 原因失败。`Closed` 是本端关闭，`Eof` 是服务端关闭，`Read` / `Write` 是 socket 错误（写出超时可能只写了
 //!   半帧），`Decode` 是坏帧。流连接与 GDP 连接的断开也用它表示。挂起队列为空时到达的响应（主连接），以及流连接上应答之后
 //!   的孤立响应不属于任何请求，与 C++ 一样丢弃，不是错误；
@@ -162,7 +162,7 @@
 //!   得到 `Disconnected`，另一个客户端的流不受影响。
 //! - **T4** `/dataSources` 流的每条数据是一个 `bin`，内容是与 GDP-TCP 逐字节相同的完整 GDP 消息，表面强度的行宽
 //!   规则也相同。C++ 不解码流载荷，[`gdp::decode_all`](crate::gdp::decode_all) 依赖它。推翻时按抓包调整
-//!   `decode_all` 的切分与强度行宽。手动：同一数据源经 `GdpClient` 与流各收一次，比较解码结果。
+//!   `decode_all` 的切分与强度行宽。手动：同一数据源经 `gdp::Client` 与流各收一次，比较解码结果。
 //!
 //! GDP：
 //!
@@ -177,7 +177,7 @@
 //!
 //! - **D1**（sdk-code）Gocator 6.x 经典设备把回复发往 UDP 3220，而非命令的源端口：两个 SDK 的发送 socket 都绑定
 //!   3220，这里的绑定临时端口。推翻时经典命令改从绑定 3220 的 socket 发出。手动：对 6.x 设备比较
-//!   `discover(_, true)` 与 C++ 的结果。
+//!   `discover_with_classic` 与 C++ 的结果。
 //! - **D2** 本机 GoPxL 能收到经物理网卡发出的受限广播，不需要从回环接口再发。两个 SDK 也从 127.0.0.1
 //!   发送。推翻时不再跳过回环接口（承担锁定网卡的风险）。暴露：在运行虚拟节点的 PC 上 `discover` 列不出
 //!   本机实例。

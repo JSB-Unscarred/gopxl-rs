@@ -4,7 +4,8 @@
 //! .NET `GoPxLSdkNet`（SDK 自身版本号 8.5.62.52）。
 //! 本 crate 直接实现线上协议（TCP 控制通道、GDP 数据通道、UDP 发现），不链接厂商库，也不依赖 C 库。
 //!
-//! 入口：[`System`]（一台设备，拥有控制连接；[`System::resource`] 取得带缓存的资源）、[`gdp::GdpClient`]（测量数据）、[`discovery::discover`]（发现）。
+//! 入口：[`System`]（一台设备，拥有控制连接；[`System::resource`] 取得带缓存的资源，[`System::gdp`] 连接数据通道）、
+//! [`gdp::Client`]（测量数据）、[`discovery::discover`]（发现）。
 //! `examples/` 是官方 C++ 示例的移植。设计约定（分层、所有权、线程、unsafe、错误）见 [`docs::architecture`]。
 
 pub mod control;
@@ -19,7 +20,7 @@ pub mod schema;
 mod system;
 pub mod value;
 
-pub use error::{Error, RequestError, Result};
+pub use error::{DisconnectReason, Error, RequestError, Result};
 pub use system::{RunState, System};
 pub use value::{Map, PointerError, Value};
 

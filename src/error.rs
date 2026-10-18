@@ -1,5 +1,6 @@
-//! 连接层与门面的错误类型 [`Error`]。变体按调用方能做什么划分：重试或重连（`Connect`、`Timeout`、
-//! `Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`、`Validation`）。
+//! 连接层与门面的错误类型 [`Error`]，以及拆连接的原因 [`DisconnectReason`]。变体按调用方能做什么划分：重试或重连
+//! （`Connect`、`Timeout`、`Disconnected`），查看服务端的回复（`Request`、`Payload`），修正参数（`InvalidArgument`、
+//! `Validation`）。
 
 use std::fmt;
 use std::io;
@@ -7,16 +8,39 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::control::{DisconnectReason, Method, Response};
+use crate::control::{InboundError, Method, Response};
+use crate::frame::FrameError;
 
 /// 本 crate 连接层的 `Result`。
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// 拆掉连接的原因。所有挂起的请求以同一个原因（`Arc`）失败：调用方能做的只有重连，所以各种原因不分别报错。
+/// 主连接、流连接与 GDP 连接的断开都用它表示。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DisconnectReason {
+    /// 本端关闭了连接（owner 被 drop）。
+    #[error("closed by the client")]
+    Closed,
+    /// 服务端在帧边界上关闭了连接。
+    #[error("closed by the server")]
+    Eof,
+    /// 读取失败、帧中途 EOF，或长度字段越界。
+    #[error(transparent)]
+    Read(#[from] FrameError),
+    /// 写出失败或超时（10 s）：可能只写出了半帧，字节流已不可信。
+    #[error("write failed: {0}")]
+    Write(io::Error),
+    /// 坏帧：服务端从不产生，字节流已不可信。
+    #[error(transparent)]
+    Decode(#[from] InboundError),
+}
 
 /// 连接层的错误，对应 C++ 的 `GoChannelError`（前三个变体）与 `GoRequestError`（`Request`）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// 建立 TCP 连接、设置 socket 或启动连接的线程失败。
+    /// 建立 TCP 连接、设置 socket、复制写句柄或启动连接的线程失败。
     #[error("connect to {addr} failed")]
     Connect {
         /// 对端地址。

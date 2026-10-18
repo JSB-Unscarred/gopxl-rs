@@ -17,7 +17,7 @@ use gopxl::discovery::{self, Instance};
 const VISIBLE_SENSORS_PATH: &str = "/scan/visibleSensors/";
 
 fn main() -> common::Result {
-    let instances = discovery::discover(common::DISCOVER_TIMEOUT, false)?;
+    let instances = discovery::discover(common::DISCOVER_TIMEOUT)?;
     println!("Number of sensors on the network: {}", instances.len());
     if instances.is_empty() {
         return Err(

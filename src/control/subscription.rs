@@ -13,7 +13,7 @@ use std::mem;
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use super::client::{Handle, Transaction, encode};
+use super::client::{Client, Transaction, encode};
 use super::{Method, Notification, Request, SubscriptionExpr};
 use crate::error::{Error, Result};
 use crate::net::lock;
@@ -39,7 +39,7 @@ pub enum Notice {
 /// 本地订阅时写出 `unSub`，不等待应答（C++ 的析构等待 `UnSub` 的应答，最多阻塞 5 s）。
 #[derive(Debug)]
 pub struct Subscription {
-    handle: Handle,
+    client: Client,
     queue: Arc<SubQueue>,
 }
 
@@ -66,7 +66,7 @@ struct Queue {
     closed: bool,
 }
 
-impl Handle {
+impl Client {
     /// 订阅表达式 `expr`（例如 `/system`、`/tools/*`），等待 `sub` 的应答（5 s）。
     ///
     /// 表达式含正则元字符等本地无法与服务端一致匹配的内容时报 `InvalidArgument`（见 [`SubscriptionExpr::new`]）。
@@ -82,13 +82,13 @@ impl Handle {
         });
         let shared = &self.shared;
         // 写锁内先登记队列再写出 sub：应答之后紧接着的通知不会漏掉，别的订阅 Drop 时也能看到它。
-        let writer = lock(&shared.writer);
+        let mut writer = lock(&shared.writer);
         lock(&shared.dispatch).subs.push(Arc::downgrade(&queue));
-        let reply = shared.write(&writer, &request, &frame);
+        let reply = shared.write(&mut writer, &request, &frame);
         drop(writer);
         // 从这里起由 Drop 注销队列、必要时退订，包括 sub 失败或超时的情况。
         let subscription = Subscription {
-            handle: self.clone(),
+            client: self.clone(),
             queue,
         };
         Transaction::new(reply, request)
@@ -105,16 +105,30 @@ impl Subscription {
         match self.queue.pop(timeout) {
             Pop::Notice(notice) => Ok(Some(notice)),
             Pop::Timeout => Ok(None),
-            Pop::Closed => Err(Error::Disconnected(self.handle.shared.link.disconnected())),
+            Pop::Closed => Err(Error::Disconnected(self.client.shared.link.disconnected())),
         }
+    }
+
+    /// 取出下一项，一直等待（`recv_timeout(Duration::MAX)`）。
+    pub fn recv(&self) -> Result<Notice> {
+        loop {
+            if let Some(notice) = self.recv_timeout(Duration::MAX)? {
+                return Ok(notice);
+            }
+        }
+    }
+
+    /// 取出已到达的下一项，不等待（`recv_timeout(Duration::ZERO)`）。
+    pub fn try_recv(&self) -> Result<Option<Notice>> {
+        self.recv_timeout(Duration::ZERO)
     }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let shared = &self.handle.shared;
+        let shared = &self.client.shared;
         let text = self.queue.expr.text();
-        let writer = lock(&shared.writer);
+        let mut writer = lock(&shared.writer);
         let mut dispatch = lock(&shared.dispatch);
         dispatch
             .subs
@@ -131,7 +145,7 @@ impl Drop for Subscription {
         let request = Request::new(Method::UnSub, text);
         // 不等应答：接收端随即丢弃，槽位成为墓碑。连接已断开时服务端自然忘记订阅，写出失败无妨。
         if let Ok(frame) = encode(&request) {
-            let _ = shared.write(&writer, &request, &frame);
+            let _ = shared.write(&mut writer, &request, &frame);
         }
     }
 }

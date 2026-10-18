@@ -23,12 +23,21 @@ const RESEND_AT: [Duration; 3] = [
 /// 排队的数据报每轮都取完，吞吐不受它限制。
 const SLICE: Duration = Duration::from_millis(20);
 
-/// 发现所有实例，等满 `timeout` 才返回（与 C++ 相同，回复的数量事先未知）。`classic` 为真时另在 UDP 3220 上
-/// 发现 Gocator 6.x 设备，排在 GoPxL 实例之后。
+/// 发现所有 GoPxL 实例，等满 `timeout` 才返回（与 C++ 相同，回复的数量事先未知）。
 ///
-/// GoPxL 实例按（地址，Web 端口）去重，先到者胜。绑定 3320 失败时返回错误：服务端本身也绑定这个端口，所以接收
+/// 实例按（地址，Web 端口）去重，先到者胜。绑定 3320 失败时返回错误：服务端本身也绑定这个端口，所以接收
 /// socket 设置 `SO_REUSEADDR`，本机运行 GoPxL PC 应用时同样能发现它。
-pub fn discover(timeout: Duration, classic: bool) -> io::Result<Vec<Instance>> {
+pub fn discover(timeout: Duration) -> io::Result<Vec<Instance>> {
+    discover_all(timeout, false)
+}
+
+/// 同 [`discover`]，另在 UDP 3220 上发现 Gocator 6.x 经典设备（[`classic`]），排在 GoPxL 实例之后。
+pub fn discover_with_classic(timeout: Duration) -> io::Result<Vec<Instance>> {
+    discover_all(timeout, true)
+}
+
+/// 两个入口共用的发现流程；`classic` 决定是否同时发经典协议的命令。
+fn discover_all(timeout: Duration, classic: bool) -> io::Result<Vec<Instance>> {
     let start = Instant::now();
     let gopxl = receiver(PORT)?;
     let legacy = if classic {

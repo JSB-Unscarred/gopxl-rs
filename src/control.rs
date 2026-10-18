@@ -1,9 +1,9 @@
-//! 控制通道（TCP）：连接（[`Client`]、[`Handle`]、[`Subscription`]、[`StreamHandle`]，对应 C++ 的
+//! 控制通道（TCP）：连接（[`Connection`]、[`Client`]、[`Subscription`]、[`StreamHandle`]，对应 C++ 的
 //! `GoRestClient`）与线上编解码（carrier 帧与 MessagePack 消息体，对应 `GoRequest`、`GoResponse` 与
 //! `GoCtrlChannelV1` 的帧格式）。
 //!
-//! 一台设备的连接：主连接（`Client`，请求与订阅）、每个流一条（`StreamHandle`）、每次文件传输一条临时连接
-//! （[`Handle::transfer`]），对应 C++ 在一条连接上承载的全部流量。
+//! 一台设备的连接：主连接（`Connection` 拥有，`Client` 发请求与订阅）、每个流一条（`StreamHandle`）、每次文件传输
+//! 一条临时连接（[`Client::transfer`]），对应 C++ 在一条连接上承载的全部流量。
 //!
 //! carrier 帧的整数都是小端，`Length` 包含自身 4 字节：
 //!
@@ -41,8 +41,7 @@ mod subscription;
 mod transfer;
 mod url;
 
-pub use client::{Client, Handle, Transaction};
-pub use state::DisconnectReason;
+pub use client::{Client, Connection, Transaction};
 use state::{ControlCore, Reply, ReplyRx};
 pub use status::Status;
 pub use stream::StreamHandle;

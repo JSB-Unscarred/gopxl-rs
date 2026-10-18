@@ -3,7 +3,7 @@
 //! 把全局设置、全部工作区与作业、回放数据和当前作业归档到 `sample_backup.gpbak`，再用这个文件恢复系统；恢复覆盖
 //! 设备上的这些内容。
 //!
-//! 与 C++ 的差异：归档与恢复走文件传输连接（`Handle::transfer`）；恢复的超时从 3 s 改为 30 s
+//! 与 C++ 的差异：归档与恢复走文件传输连接（`Client::transfer`）；恢复的超时从 3 s 改为 30 s
 //! （`common::EXTENDED_TIMEOUT`，C++ 注明它用于 backup / restore）。
 
 mod common;

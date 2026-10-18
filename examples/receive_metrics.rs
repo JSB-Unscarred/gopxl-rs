@@ -1,6 +1,6 @@
 //! 经流接收系统、扫描器与传感器的 metrics，直到按下 Enter，对应 C++ 示例 `ReceiveMetrics`。
 //!
-//! 每个流是一条自己的连接（`Handle::open_stream`），主线程轮流取出三个流的消息、逐条打印，不需要 C++ 的打印锁。
+//! 每个流是一条自己的连接（`Client::open_stream`），主线程轮流取出三个流的消息、逐条打印，不需要 C++ 的打印锁。
 //! Drop 流句柄即关闭连接、结束流，不发 `cancelStream`。字段按 Gocator 传感器打印（C++ 的 `GOCATOR_SENSOR`）。
 //!
 //! 与 C++ 的差异：数值原样输出（C++ 的 `Get<int>` 截断 `currentSyncTime` 等超出 `int` 的值）；`Type`、`Status`、

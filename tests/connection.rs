@@ -9,11 +9,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use gopxl::control::{Client, DisconnectReason, Method, Notice, Request, StreamState};
-use gopxl::gdp::{Body, GdpClient, RecvError};
+use gopxl::control::{Connection, Method, Notice, Request, StreamState};
+use gopxl::gdp::{self, Body, RecvError};
 use gopxl::resource::Resource;
 use gopxl::value::msgpack;
-use gopxl::{Error, Value};
+use gopxl::{DisconnectReason, Error, Value};
 
 /// carrier 类型：MessagePack。
 const MSGPACK: u16 = 0xB000;
@@ -146,7 +146,8 @@ fn late_response_is_absorbed_by_the_timed_out_slot() {
         write_message(&mut conn, &response("fast"));
         wait_for_close(&mut conn);
     });
-    let client = Client::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
     let slow = client
         .read("/slow")
         .timeout(Duration::from_millis(50))
@@ -155,7 +156,7 @@ fn late_response_is_absorbed_by_the_timed_out_slot() {
     let fast = client.read("/fast").response().unwrap();
     assert_eq!(fast.payload, Value::from("fast"));
     assert!(client.is_connected());
-    drop(client);
+    drop(connection);
     server.finish();
 }
 
@@ -171,7 +172,8 @@ fn server_close_fails_every_pending_request_with_one_reason() {
         expect_request(&mut conn, "read", "/b");
         // 两个请求都已入队，不回应，直接关闭。
     });
-    let client = Client::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
     let subscription = client.subscribe("/system").unwrap();
     let a = client.read("/a");
     let b = client.read("/b");
@@ -199,7 +201,7 @@ fn server_close_fails_every_pending_request_with_one_reason() {
 }
 
 // Drop 从不阻塞：读线程卡在半帧里时，Client 的 Drop 只 shutdown、不 join，立即返回（C++ 先 join 后关闭 socket，
-// 此时永远挂住）。挂起的请求以 Closed 失败；Handle 不让连接存活，之后经它发出的请求立即失败。
+// 此时永远挂住）。挂起的请求以 Closed 失败；Client 不让连接存活，之后经它发出的请求立即失败。
 #[test]
 fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
     let (half_sent, half_received) = mpsc::channel();
@@ -214,13 +216,13 @@ fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
         let _ = dropped_received.recv_timeout(STEP);
         wait_for_close(&mut conn);
     });
-    let client = Client::connect(server.addr).unwrap();
-    let handle = client.handle();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client().clone();
     let pending = client.read("/x");
     half_received.recv().unwrap();
 
     let start = Instant::now();
-    drop(client);
+    drop(connection);
     assert!(start.elapsed() < Duration::from_secs(1));
     dropped.send(()).unwrap();
 
@@ -228,9 +230,9 @@ fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
         panic!("expected Disconnected")
     };
     assert!(matches!(*reason, DisconnectReason::Closed));
-    assert!(!handle.is_connected());
+    assert!(!client.is_connected());
     assert!(matches!(
-        handle.read("/y").response(),
+        client.read("/y").response(),
         Err(Error::Disconnected(_))
     ));
     server.finish();
@@ -254,7 +256,8 @@ fn last_local_subscription_sends_unsub() {
         expect_request(&mut conn, "unSub", "/system");
         wait_for_close(&mut conn);
     });
-    let client = Client::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
     let first = client.subscribe("/system").unwrap();
     let second = client.subscribe("/system").unwrap();
     for subscription in [&first, &second] {
@@ -266,7 +269,7 @@ fn last_local_subscription_sends_unsub() {
     // 两条通知都排在探针的应答之前，/tools/1 的那条没有投给 /system 的订阅。
     assert!(second.recv_timeout(Duration::ZERO).unwrap().is_none());
     drop(second);
-    drop(client);
+    drop(connection);
     server.finish();
 }
 
@@ -286,7 +289,8 @@ fn stream_delivers_early_data_after_the_reply_in_order() {
         write_message(&mut conn, &stream_message("complete", Value::Nil));
         wait_for_close(&mut conn);
     });
-    let client = Client::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
     let stream = client
         .open_stream("/system/metrics", json(r#"{"period":1000}"#))
         .unwrap();
@@ -295,7 +299,7 @@ fn stream_delivers_early_data_after_the_reply_in_order() {
     assert_eq!(next().payload, Value::from(2));
     assert_eq!(next().state, StreamState::Complete);
     drop(stream);
-    drop(client);
+    drop(connection);
     server.finish();
 }
 
@@ -324,8 +328,9 @@ fn resource_cache_expires_on_writes_and_notices() {
         expect_request(&mut conn, "unSub", "/x/*");
         wait_for_close(&mut conn);
     });
-    let client = Client::connect(server.addr).unwrap();
-    let mut resource = Resource::new(client.handle(), "/x");
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
+    let mut resource = Resource::new(client.clone(), "/x");
     assert_eq!(resource.get::<i64>("/v").unwrap(), 1);
     assert_eq!(resource.get::<i64>("/v").unwrap(), 1);
     assert!(!resource.has_remote_changes());
@@ -337,7 +342,7 @@ fn resource_cache_expires_on_writes_and_notices() {
     assert!(resource.has_remote_changes());
     assert_eq!(resource.get::<i64>("/v").unwrap(), 4);
     drop(resource);
-    drop(client);
+    drop(connection);
     server.finish();
 }
 
@@ -355,13 +360,14 @@ fn transfer_round_trips_on_its_own_connection() {
         wait_for_close(&mut conn);
         wait_for_close(&mut main);
     });
-    let client = Client::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).unwrap();
+    let client = connection.client();
     let mut payload = Value::object();
     payload.set("/data", vec![1_u8, 2, 3]).unwrap();
     let request = Request::with_payload(Method::Call, "/system/commands/archive", payload);
     let response = client.transfer(request, STEP).unwrap();
     assert_eq!(response.payload["data"], Value::from(vec![4_u8, 5]));
-    drop(client);
+    drop(connection);
     server.finish();
 }
 
@@ -380,7 +386,7 @@ fn gdp_receive_assembles_a_data_set_across_calls() {
         conn.write_all(&gdp_signal(true)).unwrap();
         // 数据集写完即关闭。
     });
-    let mut gdp = GdpClient::connect(server.addr).unwrap();
+    let mut gdp = gdp::Client::connect(server.addr).unwrap();
     received.recv().unwrap();
     assert!(matches!(
         gdp.receive(Duration::from_secs(1)),

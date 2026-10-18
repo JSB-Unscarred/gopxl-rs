@@ -4,7 +4,7 @@
 //! 方法对任何 GDP 数据类型都适用。
 //!
 //! 与 C++ 的差异：C++ 在接收线程的回调里打印、主线程跨线程读写普通的 `bool dataReceived`（数据竞争）；这里主线程
-//! 分段 `receive` 并打印，回车由另一个线程读取（同 `receive_metrics`）。`GdpClient` 是 `Send`，要在自己的线程上
+//! 分段 `receive` 并打印，回车由另一个线程读取（同 `receive_metrics`）。`gdp::Client` 是 `Send`，要在自己的线程上
 //! 接收时把它移过去即可。
 
 mod common;
@@ -37,7 +37,7 @@ fn main() -> common::Result {
 
     let enter = thread::spawn(|| std::io::stdin().read_line(&mut String::new()));
     on_data(&gdp.receive(FIRST_DATA_TIMEOUT)?);
-    // 数据集跨越多个 POLL_INTERVAL 时，已收到的消息留在 GdpClient 里，下一次 receive 接着组装。
+    // 数据集跨越多个 POLL_INTERVAL 时，已收到的消息留在 gdp::Client 里，下一次 receive 接着组装。
     while !enter.is_finished() {
         match gdp.receive(POLL_INTERVAL) {
             Ok(data_set) => on_data(&data_set),

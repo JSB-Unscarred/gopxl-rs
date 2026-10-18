@@ -2,7 +2,7 @@
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, PixelFormat, array, optional, product, read_bool, read_vec, section, take};
+use super::{Error, PixelFormat, array, optional, product, read_bool, read_vec, section, take};
 
 /// 表面属性（C++ `GoGdpSurfaceBase`）。毫米坐标为 `offset + scale × 原始值`（统一表面的 x、y 原始值是列、行下标），
 /// SDK 不提供换算。
@@ -49,7 +49,7 @@ impl SurfaceAttrs {
     }
 
     /// 读取属性段。点云在 exposure 之后、强度格式之前多一个 isAdjacent，一并返回（统一表面为 false）。
-    fn decode(buf: &mut Bytes, point_cloud: bool) -> Result<(Self, bool), GdpError> {
+    fn decode(buf: &mut Bytes, point_cloud: bool) -> Result<(Self, bool), Error> {
         let s = &mut section(buf, 2)?;
         let length = s.try_get_u32_le()?;
         let width = s.try_get_u32_le()?;
@@ -84,12 +84,12 @@ impl SurfaceAttrs {
     }
 
     /// 点数 L×W。
-    fn point_count(&self) -> Result<usize, GdpError> {
+    fn point_count(&self) -> Result<usize, Error> {
         product(self.length as usize, self.width as usize)
     }
 
     /// 紧跟点数组的 iL 行强度。每块数据只检查 `剩余 ≥ 需要`，与 GDP-TCP 的 SDK 规则相同。
-    fn take_intensity(&self, buf: &mut Bytes) -> Result<Bytes, GdpError> {
+    fn take_intensity(&self, buf: &mut Bytes) -> Result<Bytes, Error> {
         let len = product(self.intensity_length as usize, self.intensity_row_size())?;
         Ok(take(buf, len)?)
     }
@@ -121,7 +121,7 @@ pub struct SurfacePointCloud {
 
 impl UniformSurface {
     /// 读取属性段与段外的数据。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let (attrs, _) = SurfaceAttrs::decode(buf, false)?;
         Ok(Self {
             attrs,
@@ -133,7 +133,7 @@ impl UniformSurface {
 
 impl SurfacePointCloud {
     /// 读取属性段与段外的数据。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let (attrs, is_adjacent) = SurfaceAttrs::decode(buf, true)?;
         Ok(Self {
             attrs,

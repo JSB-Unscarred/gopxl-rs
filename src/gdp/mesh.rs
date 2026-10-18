@@ -2,7 +2,7 @@
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, array, read_bool, read_items, read_vec, section, take, triple};
+use super::{Error, array, read_bool, read_items, read_vec, section, take, triple};
 
 /// 网格（类型 18，`GoGdpMesh`）。
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +55,7 @@ pub enum MeshData {
 
 impl Mesh {
     /// 读取属性段与各通道。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let has_data = read_bool(s)?;
         let system_channel_count = s.try_get_u32_le()?;
@@ -77,7 +77,7 @@ impl Mesh {
 impl MeshChannel {
     /// 读取通道段与段外的 allocateCount 个元素。C++ 不检查剩余字节，巨大的 allocateCount 会逐个 `make_shared`
     /// 直到读失败；这里由 `read_vec` / `take` 先确认字节够。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let id = s.try_get_u32_le()?;
         let ty = s.try_get_u32_le()?;
@@ -108,7 +108,7 @@ impl MeshChannel {
 mod tests {
     use bytes::Bytes;
 
-    use crate::gdp::{Body, GdpError, decode_message};
+    use crate::gdp::{Body, Error, decode_message};
 
     /// 空白分隔的十六进制文本转为字节。
     fn hex(text: &str) -> Vec<u8> {
@@ -135,6 +135,6 @@ mod tests {
         bytes[121..125].fill(0xFF);
         let msg = decode_message(Bytes::from(bytes)).unwrap();
         assert!(msg.cas.is_last_msg);
-        assert_eq!(msg.body, Body::Invalid(GdpError::Truncated));
+        assert_eq!(msg.body, Body::Invalid(Error::Truncated));
     }
 }

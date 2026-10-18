@@ -3,7 +3,7 @@
 //! 会修改设备上的作业：把当前作业保存为 `SDK-demo` 并改名为 `SDK-demo-job`，下载到 `sample_job.gpjob`，再以
 //! `SDK-local-job-demo` 上传并加载。后两个名字已存在时改名或上传失败，重复运行前先在设备上删除这两个作业。
 //!
-//! 与 C++ 的差异：作业文件的下载与上传走文件传输连接（`Handle::transfer`）；下载的读请求不再带上一步陈旧的
+//! 与 C++ 的差异：作业文件的下载与上传走文件传输连接（`Client::transfer`）；下载的读请求不再带上一步陈旧的
 //! `{"name": ...}` 载荷。
 
 mod common;
@@ -11,7 +11,7 @@ mod common;
 use std::time::Duration;
 
 use gopxl::Value;
-use gopxl::control::{Handle, Method, Request};
+use gopxl::control::{Client, Method, Request};
 
 const JOBS_PATH: &str = "/jobs";
 const JOB_FILES_PATH: &str = "/jobs/files";
@@ -75,7 +75,7 @@ fn main() -> common::Result {
 }
 
 /// 打印设备上已保存的作业名。
-fn list_jobs(client: &Handle) -> common::Result {
+fn list_jobs(client: &Client) -> common::Result {
     let files = read_expanded(client, JOB_FILES_PATH)?;
     if let Some(jobs) = files.pointer("/_embedded/item") {
         println!("List of saved jobs:");
@@ -89,7 +89,7 @@ fn list_jobs(client: &Handle) -> common::Result {
 }
 
 /// `read path`，参数 `expandLevel: 1` 把内嵌资源展开一层（作业在列表中只部分表示；省略等同于 0）。
-fn read_expanded(client: &Handle, path: &str) -> common::Result<Value> {
+fn read_expanded(client: &Client, path: &str) -> common::Result<Value> {
     let mut request = Request::new(Method::Read, path);
     request.args.set("expandLevel", 1)?;
     Ok(client.send(request).response()?.payload)

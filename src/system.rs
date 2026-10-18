@@ -7,8 +7,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::control::Client;
+use crate::control::{Client, Connection};
 use crate::error::Result;
+use crate::gdp;
 use crate::resource::{Resource, rel};
 use crate::value::Value;
 
@@ -17,11 +18,11 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 一台 GoPxL 设备，对应 C++ 的 `GoSystem`。存在即已连接，没有“未连接”的状态。
 ///
-/// 唯一拥有主连接（[`Client`]），Drop 即断开（C++ 的 `Disconnect`）。地址、连接状态与原始动词经
+/// 唯一拥有主连接（[`Connection`]），Drop 即断开（C++ 的 `Disconnect`）。地址、连接状态与原始动词经
 /// [`client`](Self::client) 访问。
 #[derive(Debug)]
 pub struct System {
-    client: Client,
+    connection: Connection,
 }
 
 /// 运行状态（`/system` 的 `runState`），对应 C++ 的 `GoSystem::State`。
@@ -38,24 +39,31 @@ pub enum RunState {
 }
 
 impl System {
-    /// 连接 `addr`（超时 1 s，见 [`Client::connect`]），对应 C++ 的 `GoSystem(address, port)` 加 `Connect`。
+    /// 连接 `addr`（超时 1 s，见 [`Connection::connect`]），对应 C++ 的 `GoSystem(address, port)` 加 `Connect`。
     pub fn connect(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
-            client: Client::connect(addr)?,
+            connection: Connection::connect(addr)?,
         })
     }
 
-    /// 主连接，对应 C++ 的 `Client`。大多数操作直接经它发出。
+    /// 主连接的句柄，对应 C++ 的 `Client`。大多数操作直接经它发出。
     pub fn client(&self) -> &Client {
-        &self.client
+        self.connection.client()
     }
 
     /// 路径 `path` 上带缓存的资源（见 [`Resource`]），开启写入前的校验，对应 C++ 的 `Resource`（`GoSystem` 的资源
     /// 管理器默认开启校验）。每次调用得到一个独立的 `Resource`，各有各的缓存。
     pub fn resource(&self, path: impl Into<String>) -> Resource {
-        let mut resource = Resource::new(self.client.handle(), path);
+        let mut resource = Resource::new(self.client().clone(), path);
         resource.set_validation(true);
         resource
+    }
+
+    /// 连接设备的 GDP 服务端（地址同主连接，端口见 [`gdp_port`](Self::gdp_port)，超时 5 s），对应官方示例
+    /// `SampleUtils` 里连接 `GoGdpClient` 的写法。
+    pub fn gdp(&self) -> Result<gdp::Client> {
+        let addr = SocketAddr::new(self.client().addr().ip(), self.gdp_port()?);
+        gdp::Client::connect(addr)
     }
 
     /// 启动设备：`call /system/commands/start`。
@@ -128,7 +136,7 @@ impl System {
 
     /// `path` 上的资源：不校验、超时 15 s，`GoSystem` 的操作都经它发请求，读不到的字段报 `Payload`。
     fn res(&self, path: &str) -> Resource {
-        let mut resource = Resource::new(self.client.handle(), path);
+        let mut resource = Resource::new(self.client().clone(), path);
         resource.set_timeout(TIMEOUT);
         resource
     }

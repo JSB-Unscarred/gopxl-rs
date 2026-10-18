@@ -2,7 +2,7 @@
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, read_bool, read_vec, section};
+use super::{Error, read_bool, read_vec, section};
 
 /// 光斑（类型 17，`GoGdpSpots`），坐标是像素。
 ///
@@ -43,7 +43,7 @@ pub struct Spot {
 
 impl Spots {
     /// 读取属性段与段外的光斑。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let count = s.try_get_u32_le()? as usize;
         Ok(Self {

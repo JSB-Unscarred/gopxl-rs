@@ -7,9 +7,9 @@
 use std::io::{ErrorKind, Write};
 use std::time::Duration;
 
-use super::client::{CONNECT_TIMEOUT, Handle, encode};
-use super::{DisconnectReason, HEADER_LEN, Inbound, Request, Response};
-use crate::error::{self, Error, Result};
+use super::client::{CONNECT_TIMEOUT, Client, encode};
+use super::{HEADER_LEN, Inbound, Request, Response};
+use crate::error::{self, DisconnectReason, Error, Result};
 use crate::frame::{FrameError, FrameReader};
 use crate::net::{self, MAX_FRAME};
 
@@ -21,7 +21,7 @@ const MAX_TRANSFER: u32 = if usize::BITS >= 64 {
     MAX_FRAME
 };
 
-impl Handle {
+impl Client {
     /// 在新连接上发送 `request` 并等待响应。`timeout` 是连续没有收到任何字节的时长上限，不限制总时长。
     ///
     /// 下载的 `Bin` 直接引用响应帧，峰值内存约为文件大小；上传的 `Bin` 编码时复制进帧，峰值约为两倍，写出之后即

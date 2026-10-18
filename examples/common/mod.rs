@@ -11,9 +11,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gopxl::control::{Handle, Method, Request};
+use gopxl::control::{Client, Method, Request};
 use gopxl::discovery::{self, Instance};
-use gopxl::gdp::{Body, Cas, GdpClient, Image, Message, PixelFormat, ProfileAttrs};
+use gopxl::gdp::{self, Body, Cas, Image, Message, PixelFormat, ProfileAttrs};
 use gopxl::{RunState, System, Value, control};
 
 /// 示例的结果类型：`main` 返回 `Err` 时打印错误并以失败退出，取代 C++ 示例逐段的 `try` / `catch`。
@@ -113,7 +113,7 @@ pub fn connect() -> Result<System> {
 /// `GOPXL_IP` 指定，避免连到别的设备上改配置。
 fn discover_one() -> Result<SocketAddr> {
     println!("GOPXL_IP is not set, discovering...");
-    let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT, false)?
+    let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT)?
         .iter()
         .filter_map(Instance::control_addr)
         .collect();
@@ -198,7 +198,7 @@ pub fn scan_source(key: &str) -> String {
 }
 
 /// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错（C++ 的 `At` 抛异常）。
-pub fn read_at(client: &Handle, path: &str, pointer: &str) -> Result<Value> {
+pub fn read_at(client: &Client, path: &str, pointer: &str) -> Result<Value> {
     let payload = client.read(path).response()?.payload;
     let value = payload
         .pointer(pointer)
@@ -207,7 +207,7 @@ pub fn read_at(client: &Handle, path: &str, pointer: &str) -> Result<Value> {
 }
 
 /// 读 `/replay/playback`，打印并返回用的是否是回放数据。
-pub fn replay_enabled(client: &Handle) -> Result<bool> {
+pub fn replay_enabled(client: &Client) -> Result<bool> {
     let enabled = read_at(client, "/replay/playback", "/enabled")?
         .as_bool()
         .ok_or("/replay/playback enabled is not a boolean")?;
@@ -216,7 +216,7 @@ pub fn replay_enabled(client: &Handle) -> Result<bool> {
 }
 
 /// 扫描模式不是 `mode` 时改为 `mode`（`name` 用于打印）。
-pub fn set_scan_mode(client: &Handle, mode: i64, name: &str) -> Result {
+pub fn set_scan_mode(client: &Client, mode: i64, name: &str) -> Result {
     let current = read_at(client, SCANNER_PATH, SCAN_MODE_PATH)?
         .as_i64()
         .ok_or("the scan mode is not an integer")?;
@@ -230,7 +230,7 @@ pub fn set_scan_mode(client: &Handle, mode: i64, name: &str) -> Result {
 }
 
 /// 开启扫描器的强度输出。
-pub fn enable_intensity(client: &Handle) -> Result {
+pub fn enable_intensity(client: &Client) -> Result {
     println!("Enabling intensity...");
     let intensity = r#"{"parameters":{"scanModeSettings":{"intensityEnabled":true}}}"#;
     client
@@ -249,7 +249,7 @@ pub fn start_if_ready(system: &System) -> Result {
 }
 
 /// 开启 GDP 输出（Gocator Protocol）。
-pub fn enable_gdp(client: &Handle) -> Result {
+pub fn enable_gdp(client: &Client) -> Result {
     println!("Enabling Gocator Protocol...");
     client
         .update("/controls/gocator", r#"{"enabled":true}"#.parse::<Value>()?)
@@ -258,7 +258,7 @@ pub fn enable_gdp(client: &Handle) -> Result {
 }
 
 /// 把数据源 `source` 加到 GDP 输出的 `output_id` 号，与它重叠的输出项后移（`autoShift`），否则重叠时被拒绝。
-pub fn add_output(client: &Handle, source: &str, output_id: i64) -> Result {
+pub fn add_output(client: &Client, source: &str, output_id: i64) -> Result {
     let mut payload = Value::object();
     payload.set("source", source)?;
     payload.set("outputId", output_id)?;
@@ -271,7 +271,7 @@ pub fn add_output(client: &Handle, source: &str, output_id: i64) -> Result {
 
 /// `source` 不在 GDP 输出表中时把它加到 0 号。按 `source` 精确匹配：C++ 把 `source.find(key)` 的返回值当作真值，
 /// 输出表非空即跳过添加。
-pub fn ensure_output(client: &Handle, source: &str) -> Result {
+pub fn ensure_output(client: &Client, source: &str) -> Result {
     let outputs = client.read("/controls/gocator/outputs").response()?.payload;
     let added = outputs["map"]
         .as_array()
@@ -284,17 +284,16 @@ pub fn ensure_output(client: &Handle, source: &str) -> Result {
     Ok(())
 }
 
-/// 连接同一主机上的 GDP 服务端，端口来自 [`System::gdp_port`]；对应 C++ 示例的
+/// 连接 GDP 服务端（[`System::gdp`]），打印进度；对应 C++ 示例的
 /// `gdpClient->Connect(system.Address(), system.GdpPort())`。
-pub fn connect_gdp(system: &System) -> Result<GdpClient> {
+pub fn connect_gdp(system: &System) -> Result<gdp::Client> {
     println!("Connecting to Gocator Protocol...");
-    let addr = SocketAddr::new(system.client().addr().ip(), system.gdp_port()?);
-    Ok(GdpClient::connect(addr)?)
+    Ok(system.gdp()?)
 }
 
 /// 用 `call <command>` 下载归档（`contents` 选内容），写到当前目录的 `file`，返回其绝对路径；对应 C++ 示例的
 /// archive 一段。响应可能超过 1 GiB，返回前释放。
-pub fn download_archive(client: &Handle, contents: &Value, file: &str) -> Result<PathBuf> {
+pub fn download_archive(client: &Client, contents: &Value, file: &str) -> Result<PathBuf> {
     let archive = Request::with_payload(Method::Call, "/system/commands/archive", contents.clone());
     let response = client.transfer(archive, RECEIVE_TIMEOUT)?;
     let data = response.payload["data"]
@@ -309,7 +308,7 @@ pub fn download_archive(client: &Handle, contents: &Value, file: &str) -> Result
 
 /// 把归档文件 `path` 作为 `data` 连同 `contents` 上传并恢复（`call /system/commands/restore`）；对应 C++ 示例的
 /// restore 一段。
-pub fn restore_archive(client: &Handle, contents: Value, path: &Path) -> Result {
+pub fn restore_archive(client: &Client, contents: Value, path: &Path) -> Result {
     let mut restore = Request::with_payload(Method::Call, "/system/commands/restore", contents);
     restore.payload.set("data", std::fs::read(path)?)?;
     println!("Restoring from {}...", path.display());
@@ -390,7 +389,7 @@ pub fn print_profile(message: &Message) -> bool {
 }
 
 /// 反复接收，直到数据集里有图像或超过 10 s；返回最后一个数据集（C++ 的 `DataSet()`）。
-pub fn wait_for_image(gdp: &mut GdpClient) -> Result<Vec<Message>> {
+pub fn wait_for_image(gdp: &mut gdp::Client) -> Result<Vec<Message>> {
     println!("Waiting until a dataset with Image data is received within 10 seconds.");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

@@ -1,4 +1,4 @@
-//! 主控制连接：[`Client`] 拥有连接，[`Handle`] 发请求，[`Transaction`] 等应答。对应 C++ 的 `GoRestClient`。
+//! 主控制连接：[`Connection`] 拥有连接，[`Client`] 发请求，[`Transaction`] 等应答。对应 C++ 的 `GoRestClient`。
 //!
 //! 一条连接一个读线程，请求在调用方线程上写出：
 //! - 调用方在写锁内先 [`ControlCore::register`] 再写出整帧，槽位顺序因此等于线上顺序；写出失败或超时（10 s）
@@ -8,26 +8,23 @@
 //!   都不读；读线程也从不等待消费者（订阅队列满了丢最老的），服务端的 10 s 写超时会断开读得慢的客户端。
 //!
 //! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown、所有挂起的请求以同一个原因失败、关闭订阅队列。
-//! 读错误、EOF、坏帧、写失败与 `Client` 的 Drop 都走这里，不依赖读线程醒来（见 `Link`）；之后
-//! [`Handle::is_connected`] 为假，每个阻塞调用都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的
+//! 读错误、EOF、坏帧、写失败与 `Connection` 的 Drop 都走这里，不依赖读线程醒来（见 `Link`）；之后
+//! [`Client::is_connected`] 为假，每个阻塞调用都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的
 //! 请求失败，EOF 时忙等，`IsConnected` 一直为真。
 
 use std::convert::Infallible;
 use std::fmt;
 use std::io::{BufReader, Write};
-use std::net::SocketAddr;
-use std::ops::Deref;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
 use super::subscription::{self, SubQueue};
-use super::{
-    ControlCore, DisconnectReason, HEADER_LEN, Inbound, Method, ReplyRx, Request, Response,
-};
-use crate::error::{self, Error, Result};
+use super::{ControlCore, HEADER_LEN, Inbound, Method, ReplyRx, Request, Response};
+use crate::error::{self, DisconnectReason, Error, Result};
 use crate::frame::FrameReader;
 use crate::net::{self, Link, MAX_FRAME, lock};
 use crate::value::Value;
@@ -41,20 +38,25 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 /// 主控制连接的唯一 owner，对应 C++ 的 `GoRestClient` / `GoSystem` 的连接部分。
 ///
 /// 不 `Clone`；Drop 即断开（C++ 的 `Disconnect`）：拆连接、所有挂起的请求以 [`DisconnectReason::Closed`] 失败，
-/// 不触发断开回调；不 join 读线程（见 `Link`）。另一线程正阻塞在写出上时，它最多再等 10 s 写超时。经 [`Deref`]
-/// 直接调用 [`Handle`] 的方法。
+/// 不触发断开回调；不 join 读线程（见 `Link`）。另一线程正阻塞在写出上时，它最多再等 10 s 写超时。请求、订阅与流
+/// 经 [`client`](Self::client) 发出。
 #[derive(Debug)]
-pub struct Client {
-    handle: Handle,
+pub struct Connection {
+    client: Client,
 }
 
-impl Client {
+impl Connection {
     /// 连接 `addr`（超时 1 s），启动读线程。
     pub fn connect(addr: SocketAddr) -> Result<Self> {
+        let socket = net::connect(addr, CONNECT_TIMEOUT)?;
+        // 写句柄是同一个 socket 的另一个句柄：读线程经 `link` 读，写出在写锁内，shutdown 对两者都生效。
+        let writer = socket
+            .try_clone()
+            .map_err(|source| Error::Connect { addr, source })?;
         let shared = Arc::new(Shared {
             addr,
-            link: Link::new(net::connect(addr, CONNECT_TIMEOUT)?),
-            writer: Mutex::default(),
+            link: Link::new(socket),
+            writer: Mutex::new(writer),
             dispatch: Mutex::default(),
             writes: AtomicU64::new(0),
         });
@@ -67,46 +69,39 @@ impl Client {
             })
             .map_err(|source| Error::Connect { addr, source })?;
         Ok(Self {
-            handle: Handle { shared },
+            client: Client { shared },
         })
     }
 
-    /// 一个新的 [`Handle`]，可以移到别的线程或存进别的对象。
-    pub fn handle(&self) -> Handle {
-        self.handle.clone()
+    /// 发请求、订阅、开流的句柄；clone 可以移到别的线程或存进别的对象，但不让连接存活。
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 }
 
-impl Deref for Client {
-    type Target = Handle;
-
-    fn deref(&self) -> &Handle {
-        &self.handle
-    }
-}
-
-impl Drop for Client {
+impl Drop for Connection {
     fn drop(&mut self) {
-        self.handle.shared.teardown(DisconnectReason::Closed);
+        self.client.shared.teardown(DisconnectReason::Closed);
     }
 }
 
-/// 主连接的 owned 句柄：发请求、订阅、开流，不拥有连接。`Client` Drop 之后，经它发出的请求立即以
+/// 主连接的 owned 句柄：发请求、订阅、开流，不拥有连接。`Connection` Drop 之后，经它发出的请求立即以
 /// `Disconnected(Closed)` 失败。
 #[derive(Clone)]
-pub struct Handle {
+pub struct Client {
     pub(super) shared: Arc<Shared>,
 }
 
-/// 连接的共享状态，由 `Handle`（经 `Arc`）与读线程共同持有。
+/// 连接的共享状态，由 `Client`（经 `Arc`）与读线程共同持有。
 pub(super) struct Shared {
     addr: SocketAddr,
     pub(super) link: Link,
-    /// 写锁：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在它里面。
-    pub(super) writer: Mutex<()>,
+    /// 写锁，锁内是 socket 的写句柄：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在
+    /// 它里面。读线程经 `link` 读同一个 socket，不取这把锁。
+    pub(super) writer: Mutex<TcpStream>,
     /// 分派锁：读线程处理每一帧时持有。
     pub(super) dispatch: Mutex<Dispatch>,
-    /// 经这条连接发出的变更请求数，见 [`Handle::write_count`]。
+    /// 经这条连接发出的变更请求数，见 [`Client::write_count`]。
     writes: AtomicU64,
 }
 
@@ -153,10 +148,10 @@ impl Shared {
         }
     }
 
-    /// 登记并写出一帧。`_writer` 证明调用方持有写锁。
+    /// 登记并写出一帧；`socket` 是写锁里的写句柄，调用方持锁。
     pub(super) fn write(
         &self,
-        _writer: &MutexGuard<'_, ()>,
+        socket: &mut TcpStream,
         request: &Request,
         frame: &[u8],
     ) -> Result<ReplyRx> {
@@ -164,9 +159,9 @@ impl Shared {
             return Err(Error::Disconnected(Arc::clone(reason)));
         }
         let reply = lock(&self.dispatch).core.register();
-        // 在写锁内计数，见 `Handle::write_count`。
+        // 在写锁内计数，见 `Client::write_count`。
         self.count_write(request.method);
-        if let Err(error) = (&self.link.socket).write_all(frame) {
+        if let Err(error) = socket.write_all(frame) {
             self.teardown(DisconnectReason::Write(error));
             return Err(Error::Disconnected(self.link.disconnected()));
         }
@@ -187,7 +182,7 @@ pub(super) fn encode(request: &Request) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
-impl Handle {
+impl Client {
     /// 写出任意请求，返回等待应答的 [`Transaction`]。
     ///
     /// 写出失败时返回的 `Transaction` 立即以 `Disconnected` 完成，调用方只在 [`Transaction::response`] 处处理错误。
@@ -202,7 +197,7 @@ impl Handle {
         } else {
             encode(&request).and_then(|frame| {
                 self.shared
-                    .write(&lock(&self.shared.writer), &request, &frame)
+                    .write(&mut lock(&self.shared.writer), &request, &frame)
             })
         };
         Transaction::new(reply, request)
@@ -254,9 +249,9 @@ impl Handle {
     }
 }
 
-impl fmt::Debug for Handle {
+impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Handle")
+        f.debug_struct("Client")
             .field("addr", &self.shared.addr)
             .field("connected", &self.is_connected())
             .finish()

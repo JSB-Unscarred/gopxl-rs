@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::control::{Handle, Method, Request, Status, Subscription, Transaction};
+use crate::control::{Client, Method, Request, Status, Subscription, Transaction};
 use crate::error::{Error, Result};
 use crate::schema;
 use crate::value::{Map, Value};
@@ -41,14 +41,14 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// owned、`Send`，唯一拥有自己的缓存与订阅。Drop 时订阅随之释放，写出 `unSub`、不等应答（C++ 的析构等待应答，
 /// 最多阻塞 5 s）。不让连接存活：`System` Drop 之后，请求以 `Disconnected` 失败。
 pub struct Resource {
-    handle: Handle,
+    client: Client,
     path: String,
     timeout: Duration,
     expand_level: i32,
     validation: bool,
     /// 读缓存；`None` 时下一次访问读服务端。
     data: Option<Value>,
-    /// 发出读取 `data` 的请求之前连接的写计数（`Handle::write_count`）。
+    /// 发出读取 `data` 的请求之前连接的写计数（`Client::write_count`）。
     epoch: u64,
     /// `_schema` 缓存，与 `data` 分开（C++ 读 schema 时用不展开的数据覆盖数据缓存）。
     schema: Option<Value>,
@@ -58,9 +58,9 @@ pub struct Resource {
 impl Resource {
     /// 路径 `path` 上的资源，不发请求，对应 C++ 的 `GoResource(client, uri)`：超时 5 s、展开层级 0、不校验。
     /// 路径原样发送；订阅要求规范路径（以 `/` 开头、没有空段），见 [`subscribe`](Self::subscribe)。
-    pub fn new(handle: Handle, path: impl Into<String>) -> Self {
+    pub fn new(client: Client, path: impl Into<String>) -> Self {
         Self {
-            handle,
+            client,
             path: path.into(),
             timeout: DEFAULT_TIMEOUT,
             expand_level: 0,
@@ -78,8 +78,8 @@ impl Resource {
     }
 
     /// 所在的连接，对应 C++ 的 `GoResourceManager::Client`；原始动词与读参数经它发送。
-    pub fn handle(&self) -> &Handle {
-        &self.handle
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     /// 本资源各请求的超时，对应 C++ 的 `SetTimeout`。
@@ -122,8 +122,8 @@ impl Resource {
         let data = if let Some(data) = self.data.take() {
             data
         } else {
-            // 先取计数再发请求，见 `Handle::write_count`。
-            self.epoch = self.handle.write_count();
+            // 先取计数再发请求，见 `Client::write_count`。
+            self.epoch = self.client.write_count();
             self.read(Map::from([
                 ("expandLevel".to_owned(), Value::from(self.expand_level)),
                 ("includeSchema".to_owned(), Value::Bool(false)),
@@ -186,7 +186,7 @@ impl Resource {
                 });
             }
         }
-        self.handle
+        self.client
             .update(&self.path, patch)
             .timeout(self.timeout)
             .response()?;
@@ -265,7 +265,7 @@ impl Resource {
     /// 在本集合中创建子资源（`create`），对应 C++ 的 `CreateChild`。新资源的路径取响应载荷的 `path`，没有时取
     /// `_links.self.href`，都没有时报 `Payload`（响应形态是协议假设 R2）。
     pub fn create_child(&self, args: impl Into<Value>) -> Result<Resource> {
-        let response = self.handle.create(&self.path, args);
+        let response = self.client.create(&self.path, args);
         let payload = response.timeout(self.timeout).response()?.payload;
         let path = [payload["path"].as_str(), href(&payload)]
             .into_iter()
@@ -284,7 +284,7 @@ impl Resource {
     /// 相对路径。
     pub fn delete(self) -> Result<()> {
         match self
-            .handle
+            .client
             .delete(&self.path)
             .timeout(self.timeout)
             .response()
@@ -297,19 +297,19 @@ impl Resource {
     /// `call` 本资源（例如 `/controls/gocator/outputs/commands/add`），对应 C++ 的 `Call`。超时是资源的超时，可以再用
     /// [`Transaction::timeout`] 修改。
     pub fn call(&self, args: impl Into<Value>) -> Transaction {
-        self.handle.call(&self.path, args).timeout(self.timeout)
+        self.client.call(&self.path, args).timeout(self.timeout)
     }
 
     /// 调用命令 `<路径>/commands/<name>`，对应 C++ 的 `CallCommand`；超时同 [`call`](Self::call)。
     pub fn command(&self, name: &str, args: impl Into<Value>) -> Transaction {
         let path = self.join(&format!("commands/{name}"));
-        self.handle.call(&path, args).timeout(self.timeout)
+        self.client.call(&path, args).timeout(self.timeout)
     }
 
     /// 调用动作 `<路径>/actions/<name>`，对应 C++ 的 `CallAction`；超时同 [`call`](Self::call)。
     pub fn action(&self, name: &str, args: impl Into<Value>) -> Transaction {
         let path = self.join(&format!("actions/{name}"));
-        self.handle.call(&path, args).timeout(self.timeout)
+        self.client.call(&path, args).timeout(self.timeout)
     }
 
     /// `_links` 中 `go:command` 各链接 href 的最后一段，对应 C++ 的 `CommandNames`。
@@ -331,7 +331,7 @@ impl Resource {
     /// `create_child`、`children` 得到的资源。订阅之前的修改没有通知，所以订阅时丢弃数据缓存。
     pub fn subscribe(&mut self) -> Result<()> {
         if self.subscription.is_none() {
-            self.subscription = Some(self.handle.subscribe(&self.join("*"))?);
+            self.subscription = Some(self.client.subscribe(&self.join("*"))?);
             self.data = None;
         }
         Ok(())
@@ -363,14 +363,14 @@ impl Resource {
         Resource {
             timeout: self.timeout,
             validation: self.validation,
-            ..Resource::new(self.handle.clone(), path)
+            ..Resource::new(self.client.clone(), path)
         }
     }
 
     /// 连接的写计数变了、连接已断开（订阅队列随之丢弃未取走的通知；C++ 的 `ResetConnectionState`），或订阅队列里
     /// 有通知时，丢弃数据缓存。
     fn refresh(&mut self) {
-        if self.epoch != self.handle.write_count() || !self.handle.is_connected() {
+        if self.epoch != self.client.write_count() || !self.client.is_connected() {
             self.data = None;
         }
         if let Some(subscription) = &self.subscription {
@@ -385,7 +385,7 @@ impl Resource {
     fn read(&self, args: Map) -> Result<Value> {
         let mut request = Request::new(Method::Read, self.path.clone());
         request.args = args.into();
-        let response = self.handle.send(request).timeout(self.timeout).response()?;
+        let response = self.client.send(request).timeout(self.timeout).response()?;
         Ok(response.payload)
     }
 

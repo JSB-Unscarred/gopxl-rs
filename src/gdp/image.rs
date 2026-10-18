@@ -4,7 +4,7 @@ use std::fmt;
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, array, optional, product, read_bool, section, take};
+use super::{Error, array, optional, product, read_bool, section, take};
 
 /// 图像（类型 16，`GoGdpImage`）。
 #[derive(Clone, Debug, PartialEq)]
@@ -49,7 +49,7 @@ impl Image {
     }
 
     /// 读取属性段（31 字节，1.3 起 63 字节）与段外的像素。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let height = s.try_get_u32_le()?;
         let width = s.try_get_u32_le()?;

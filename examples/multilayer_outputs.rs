@@ -8,7 +8,7 @@
 
 mod common;
 
-use gopxl::gdp::{Body, GdpClient, Message};
+use gopxl::gdp::{self, Body, Message};
 use gopxl::{System, Value};
 
 /// 清空 GDP 输出表。
@@ -84,7 +84,7 @@ fn main() -> common::Result {
 
 /// 就绪时启动设备，接收并打印一个数据集，对应 C++ 每个阶段末尾的 `Start`、`ReceiveData` 与 `TransformDataSet`。
 /// 与 C++ 一样，接收失败只打印错误，示例继续下一阶段；未结束的数据集留在 `gdp` 里，下一次接收接着组装。
-fn receive(system: &System, gdp: &mut GdpClient) -> common::Result {
+fn receive(system: &System, gdp: &mut gdp::Client) -> common::Result {
     common::start_if_ready(system)?;
     let data_set = match gdp.receive(common::RECEIVE_TIMEOUT) {
         Ok(data_set) => {

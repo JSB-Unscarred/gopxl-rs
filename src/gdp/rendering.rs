@@ -2,7 +2,7 @@
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, array, optional, read_bool, read_items, read_vec, section, text, triple};
+use super::{Error, array, optional, read_bool, read_items, read_vec, section, text, triple};
 
 /// 叠加图形（类型 70，`GoGdpRendering` / `GoGraphics`）。各计数按 `u16` 读取（C++ 用 `k16s`，≥ 32768 时跳过循环
 /// 并错位）。
@@ -149,7 +149,7 @@ pub struct Position {
 
 impl Rendering {
     /// 读取计数段与各图元。计数段是独立的切片，按图元的顺序从中依次取出计数。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let counts = &mut section(buf, 2)?;
         let mut count = || counts.try_get_u16_le().map(u32::from);
         Ok(Self {
@@ -165,13 +165,13 @@ impl Rendering {
 }
 
 /// 读取段外、紧跟段尾的 `count` 个 `f32` 点。
-fn read_points(buf: &mut Bytes, count: u16) -> Result<Vec<[f32; 3]>, GdpError> {
+fn read_points(buf: &mut Bytes, count: u16) -> Result<Vec<[f32; 3]>, Error> {
     read_vec(buf, count.into(), |b| triple(b, f32::from_le_bytes))
 }
 
 impl PointSet {
     /// 读取 16 字节的段与段外的点。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             size: s.try_get_f32_le()?,
@@ -184,7 +184,7 @@ impl PointSet {
 
 impl LineSet {
     /// 读取 14 字节的段与段外的点。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             width: s.try_get_f32_le()?,
@@ -198,7 +198,7 @@ impl LineSet {
 
 impl Region {
     /// 读取段外的类型字节与区域的段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let ty = buf.try_get_u8()?;
         let s = &mut section(buf, 2)?;
         Ok(match ty {
@@ -241,7 +241,7 @@ impl Region {
 
 impl Plane {
     /// 读取 18 字节的段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             distance: s.try_get_f32_le()?,
@@ -252,7 +252,7 @@ impl Plane {
 
 impl Ray {
     /// 读取 34 字节的段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             position: array(s, Bytes::try_get_f32_le)?,
@@ -265,7 +265,7 @@ impl Ray {
 
 impl Label {
     /// 读取 28+L 字节（1.5 为 36+L）的段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         let text = text(s, 2)?;
         let position = array(s, Bytes::try_get_f64_le)?;
@@ -282,7 +282,7 @@ impl Label {
 
 impl Position {
     /// 读取 27 字节的段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             position: array(s, Bytes::try_get_f64_le)?,

@@ -3,7 +3,7 @@
 //! 会修改设备：开启录制，把扫描器改为 10 Hz 时间触发，运行 0.5 s 后停止；用只含当前作业与回放数据的归档把录制下载到
 //! `sample_recording.gprec`，再恢复它并开启回放。
 //!
-//! 与 C++ 的差异：录制的下载与上传（归档、恢复）走文件传输连接（`Handle::transfer`）；只移植 `GOCATOR_SENSOR`
+//! 与 C++ 的差异：录制的下载与上传（归档、恢复）走文件传输连接（`Client::transfer`）；只移植 `GOCATOR_SENSOR`
 //! 分支（触发参数在扫描器上；SmartCam 的在传感器上）。
 
 mod common;

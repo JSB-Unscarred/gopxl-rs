@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use socket2::{SockRef, TcpKeepalive};
 
-use crate::control::DisconnectReason;
+use crate::error::DisconnectReason;
 use crate::error::{Error, Result};
 
 /// 写超时：与服务端的 10 s 写超时对称（协议假设 C1）。超时或只写出半帧后连接不再可用，由调用方拆掉。

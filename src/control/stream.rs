@@ -1,6 +1,6 @@
 //! 流：每个流一条自有连接，对应 C++ 的 `StartStream` / `StopStream` / `SetStreamHandler`。
 //!
-//! [`Handle::open_stream`] 对同一台设备再开一条控制连接，只写出一个 `stream` 请求；之后读线程 `gopxl-stream` 把
+//! [`Client::open_stream`] 对同一台设备再开一条控制连接，只写出一个 `stream` 请求；之后读线程 `gopxl-stream` 把
 //! 流消息放进有界通道，[`StreamHandle`] Drop 即关闭连接（服务端在连接关闭时清理流），从不发 `cancelStream`。
 //! 这样主连接上没有流：流结束与 `cancelStream` 竞争产生的孤立响应、`removeStream` / `streamStart` 失败的孤立
 //! 响应都只会出现在这条连接上，应答之后的响应一律忽略；C++ 把它们当作下一个请求的应答，此后全部错位。
@@ -12,9 +12,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use super::client::{CONNECT_TIMEOUT, Handle, Transaction, encode};
-use super::{DisconnectReason, HEADER_LEN, Inbound, Method, Reply, Request, StreamMessage};
-use crate::error::{Error, Result};
+use super::client::{CONNECT_TIMEOUT, Client, Transaction, encode};
+use super::{HEADER_LEN, Inbound, Method, Reply, Request, StreamMessage};
+use crate::error::{DisconnectReason, Error, Result};
 use crate::frame::FrameReader;
 use crate::net::{self, Link, MAX_FRAME};
 use crate::value::Value;
@@ -34,7 +34,7 @@ pub struct StreamHandle {
     messages: Receiver<StreamMessage>,
 }
 
-impl Handle {
+impl Client {
     /// 在新连接上开始流 `path`（例如 `/system/metrics`、`/dataSources/<id>/data`），`payload` 原样放进请求
     /// （例如 `{"period": 微秒}`），等待应答（5 s）。应答的 `status` 不是 OK 时报 `Request`。每个流一条连接是协议
     /// 假设 T1。
@@ -87,6 +87,20 @@ impl StreamHandle {
                 Err(Error::Disconnected(self.link.disconnected()))
             }
         }
+    }
+
+    /// 取出下一条流消息，一直等待（`recv_timeout(Duration::MAX)`）。
+    pub fn recv(&self) -> Result<StreamMessage> {
+        loop {
+            if let Some(message) = self.recv_timeout(Duration::MAX)? {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// 取出已到达的下一条流消息，不等待（`recv_timeout(Duration::ZERO)`）。
+    pub fn try_recv(&self) -> Result<Option<StreamMessage>> {
+        self.recv_timeout(Duration::ZERO)
     }
 }
 

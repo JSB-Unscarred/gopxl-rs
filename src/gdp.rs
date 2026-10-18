@@ -42,7 +42,7 @@ use bytes::{Buf, Bytes, TryGetError};
 use crate::control::Status;
 use crate::frame::take;
 
-pub use client::{GdpClient, RecvError};
+pub use client::{Client, RecvError};
 pub use image::{Image, PixelFormat};
 pub use mesh::{Mesh, MeshChannel, MeshData};
 pub use profile::{ProfileAttrs, ProfilePointCloud, UniformProfile};
@@ -60,7 +60,7 @@ pub const HEADER_LEN: u32 = 6;
 /// [`decode_message`] 与 [`decode_all`] 的错误，也是 [`Body::Invalid`] 的原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum GdpError {
+pub enum Error {
     /// 数据短于字段声明的长度。
     #[error("GDP data is shorter than its fields declare")]
     Truncated,
@@ -70,7 +70,7 @@ pub enum GdpError {
 }
 
 /// 越界读取都意味着数据短于字段声明的长度。
-impl From<TryGetError> for GdpError {
+impl From<TryGetError> for Error {
     fn from(_: TryGetError) -> Self {
         Self::Truncated
     }
@@ -154,7 +154,7 @@ pub enum Body {
     /// 未知类型（含 1.5 从不发送的 Health 100）：CAS 之后的原始字节，帧的零拷贝切片。
     Unknown(Bytes),
     /// 已知类型，但 CAS 之后的部分解析失败；CAS 仍然有效。
-    Invalid(GdpError),
+    Invalid(Error),
 }
 
 /// 时间戳（类型 11，`GoGdpStamp`）。
@@ -238,17 +238,17 @@ pub struct CircleFeature {
 ///
 /// `size` 必须等于 `frame.len()` 且 ≥ 6，CAS 必须完好，否则返回 `Err`：字节流已经无法信任，由连接层决定断开。
 /// CAS 之后的部分解析失败不返回 `Err`，而是 [`Body::Invalid`]。
-pub fn decode_message(mut frame: Bytes) -> Result<Message, GdpError> {
+pub fn decode_message(mut frame: Bytes) -> Result<Message, Error> {
     let message = section(&mut frame, 4)?;
     if frame.has_remaining() {
-        return Err(GdpError::Malformed);
+        return Err(Error::Malformed);
     }
     decode_sized(message)
 }
 
 /// 解码控制通道 `/dataSources` 流的 bin：连续的完整消息，边界由每条消息的 `size` 决定，`size` 的规则与
 /// [`decode_message`] 相同。流载荷与 GDP-TCP 的消息逐字节相同是协议假设 T4。
-pub fn decode_all(mut payload: Bytes) -> Result<Vec<Message>, GdpError> {
+pub fn decode_all(mut payload: Bytes) -> Result<Vec<Message>, Error> {
     let mut messages = Vec::new();
     while payload.has_remaining() {
         messages.push(decode_sized(section(&mut payload, 4)?)?);
@@ -257,7 +257,7 @@ pub fn decode_all(mut payload: Bytes) -> Result<Vec<Message>, GdpError> {
 }
 
 /// `size` 之后的部分：类型、CAS 与类型相关部分。
-fn decode_sized(mut buf: Bytes) -> Result<Message, GdpError> {
+fn decode_sized(mut buf: Bytes) -> Result<Message, Error> {
     let ty = buf.try_get_u16_le()?;
     let cas = Cas::decode(&mut buf)?;
     let body = decode_body(ty, &mut buf).unwrap_or_else(Body::Invalid);
@@ -266,7 +266,7 @@ fn decode_sized(mut buf: Bytes) -> Result<Message, GdpError> {
 
 impl Cas {
     /// 读取 CAS 段：`spaceType` … `isLastMsg` 是 1.0 之前就有的必需字段，`gdpId` 可选。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 4)?;
         let space_type = s.try_get_u8()?;
         let transform = read_bool(s)?
@@ -291,7 +291,7 @@ impl Cas {
 }
 
 /// 按类型解码 CAS 之后的部分（C++ `MakeGoGdpMsg` 的分派）。
-fn decode_body(ty: u16, buf: &mut Bytes) -> Result<Body, GdpError> {
+fn decode_body(ty: u16, buf: &mut Bytes) -> Result<Body, Error> {
     let read_f64 = Bytes::try_get_f64_le;
     Ok(match ty {
         1 => Body::Signal,
@@ -337,7 +337,7 @@ fn decode_body(ty: u16, buf: &mut Bytes) -> Result<Body, GdpError> {
 
 impl Stamp {
     /// 读取 58 字节的属性段。
-    fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let s = &mut section(buf, 2)?;
         Ok(Self {
             frame_index: s.try_get_u64_le()?,
@@ -356,18 +356,18 @@ impl Stamp {
 ///
 /// 段内读取以返回的切片为界，未读的字段随段尾一起跳过（向前兼容）。长度小于自身宽度（C++ 的 u64 下溢）或超出
 /// 外层段时报 `Malformed`，防止错位读进下一段。
-fn section(buf: &mut Bytes, width: usize) -> Result<Bytes, GdpError> {
+fn section(buf: &mut Bytes, width: usize) -> Result<Bytes, Error> {
     let size = buf.try_get_uint_le(width)?;
     usize::try_from(size)
         .ok()
         .and_then(|size| size.checked_sub(width))
         .and_then(|len| take(buf, len).ok())
-        .ok_or(GdpError::Malformed)
+        .ok_or(Error::Malformed)
 }
 
 /// 两个尺寸的乘积。溢出时数据不可能放进消息，按截断处理（C++ 用 32 位回绕的乘法）。
-fn product(a: usize, b: usize) -> Result<usize, GdpError> {
-    a.checked_mul(b).ok_or(GdpError::Truncated)
+fn product(a: usize, b: usize) -> Result<usize, Error> {
+    a.checked_mul(b).ok_or(Error::Truncated)
 }
 
 /// 读取 `count` 个各占 `N` 字节的小端元素，`read` 把一个元素的字节转换为值。先确认字节够再分配，声明巨大计数的
@@ -376,7 +376,7 @@ fn read_vec<T, const N: usize>(
     buf: &mut Bytes,
     count: usize,
     read: impl Fn([u8; N]) -> T,
-) -> Result<Vec<T>, GdpError> {
+) -> Result<Vec<T>, Error> {
     let data = take(buf, product(count, N)?)?;
     // chunks_exact 的每块恰好 N 字节，转换总是成功，默认值不会出现；map 让 collect 得到确切长度，只分配一次。
     Ok(data
@@ -399,8 +399,8 @@ fn triple<T>(b: [u8; 12], read: fn([u8; 4]) -> T) -> [T; 3] {
 fn read_items<T>(
     buf: &mut Bytes,
     count: u32,
-    mut read: impl FnMut(&mut Bytes) -> Result<T, GdpError>,
-) -> Result<Vec<T>, GdpError> {
+    mut read: impl FnMut(&mut Bytes) -> Result<T, Error>,
+) -> Result<Vec<T>, Error> {
     let mut items = Vec::new();
     for _ in 0..count {
         items.push(read(buf)?);
@@ -438,7 +438,7 @@ fn read_bool(buf: &mut Bytes) -> Result<bool, TryGetError> {
 }
 
 /// 读取以 `width` 字节小端长度开头的文本（线上不带结尾 NUL），保留全部字节，非法 UTF-8 替换为 U+FFFD。
-fn text(buf: &mut Bytes, width: usize) -> Result<String, GdpError> {
+fn text(buf: &mut Bytes, width: usize) -> Result<String, Error> {
     let len = usize::try_from(buf.try_get_uint_le(width)?).unwrap_or(usize::MAX);
     Ok(String::from_utf8_lossy(&take(buf, len)?).into_owned())
 }

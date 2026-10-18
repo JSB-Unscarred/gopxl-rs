@@ -2,7 +2,7 @@
 
 use bytes::{Buf, Bytes};
 
-use super::{GdpError, read_vec, section, take};
+use super::{Error, read_vec, section, take};
 
 /// 轮廓属性（C++ `GoGdpProfileBase`）。毫米坐标为 `offset + scale × 原始值`，SDK 不提供换算。
 /// C++ 的 `Width`、`IntensityWidth` 即点数组与强度的长度。
@@ -44,7 +44,7 @@ pub struct ProfilePointCloud {
 
 impl ProfileAttrs {
     /// 读取属性段，另返回点数 W 与强度字节数 iW。
-    fn decode(buf: &mut Bytes) -> Result<(Self, usize, usize), GdpError> {
+    fn decode(buf: &mut Bytes) -> Result<(Self, usize, usize), Error> {
         let s = &mut section(buf, 2)?;
         let width = s.try_get_u32_le()? as usize;
         let intensity_width = s.try_get_u32_le()? as usize;
@@ -61,7 +61,7 @@ impl ProfileAttrs {
 
 impl UniformProfile {
     /// 读取属性段与段外的数据。数据不足报 `Truncated`（C++ 的 `kERROR_INCOMPLETE`）。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let (attrs, width, intensity_width) = ProfileAttrs::decode(buf)?;
         Ok(Self {
             attrs,
@@ -73,7 +73,7 @@ impl UniformProfile {
 
 impl ProfilePointCloud {
     /// 读取属性段与段外的数据。数据不足报 `Truncated`。
-    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, GdpError> {
+    pub(super) fn decode(buf: &mut Bytes) -> Result<Self, Error> {
         let (attrs, width, intensity_width) = ProfileAttrs::decode(buf)?;
         Ok(Self {
             attrs,

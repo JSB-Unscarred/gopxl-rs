@@ -16,7 +16,7 @@ use common::{
     section, trigger_event_name,
 };
 use gopxl::Value;
-use gopxl::control::Handle;
+use gopxl::control::Client;
 
 const DIGITAL_OUTPUT_PORT_PATH: &str = "/controls/digitalOutput/devices/device-0/ports/port-0";
 
@@ -87,7 +87,7 @@ fn main() -> common::Result {
 }
 
 /// 开启数字输出，没有输出设备时加入第一个可用设备，把 port-0 的触发事件设为软件，再触发脉冲。
-fn configure_digital_output(client: &Handle) -> common::Result {
+fn configure_digital_output(client: &Client) -> common::Result {
     println!("Enabling Digital Output...");
     let payload = r#"{"enabled":true}"#.parse::<Value>()?;
     client.update(DIGITAL_OUTPUT_PATH, payload).response()?;

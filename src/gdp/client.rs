@@ -1,4 +1,4 @@
-//! GDP 接收：[`GdpClient`] 拥有一条只读的 TCP 连接，读线程 `gopxl-gdp` 逐条解码消息，`receive` 在调用方线程上
+//! GDP 接收：[`Client`] 拥有一条只读的 TCP 连接，读线程 `gopxl-gdp` 逐条解码消息，`receive` 在调用方线程上
 //! 按 `is_last_msg` 组集。对应 C++ 的 `GoGdpClient`。
 //!
 //! 读线程与消费者之间是容量很小的有界通道：不调用 `receive` 时读线程阻塞，TCP 背压传到服务端，由服务端丢弃数据
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{HEADER_LEN, Message, decode_message};
-use crate::control::DisconnectReason;
+use crate::error::DisconnectReason;
 use crate::error::{Error, Result};
 use crate::frame::FrameReader;
 use crate::net::{self, Link, MAX_FRAME};
@@ -26,7 +26,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 消息通道的容量：读线程解码下一条时消费者处理上一条；一条表面数据可达十几 MB，容量小即本地内存小。
 const QUEUE: usize = 4;
 
-/// [`GdpClient::receive`] 的错误。
+/// [`Client::receive`] 的错误。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecvError {
@@ -51,7 +51,7 @@ pub enum RecvError {
 /// socket 留到服务端推送下一条数据时才释放（已 shutdown 的 socket 收到数据即重置连接）。服务端一侧与 C++ 关闭
 /// socket 时相同，都在下一次写出时才发现连接已关闭。
 #[derive(Debug)]
-pub struct GdpClient {
+pub struct Client {
     addr: SocketAddr,
     link: Arc<Link>,
     messages: Receiver<Message>,
@@ -59,7 +59,7 @@ pub struct GdpClient {
     partial: Vec<Message>,
 }
 
-impl GdpClient {
+impl Client {
     /// 连接 GDP 服务端（超时 5 s），启动读线程。
     pub fn connect(addr: SocketAddr) -> Result<Self> {
         let link = Arc::new(Link::new(net::connect(addr, CONNECT_TIMEOUT)?));
@@ -118,7 +118,7 @@ impl GdpClient {
     }
 }
 
-impl Drop for GdpClient {
+impl Drop for Client {
     fn drop(&mut self) {
         self.link.shutdown();
     }

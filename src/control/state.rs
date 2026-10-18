@@ -2,34 +2,11 @@
 //! [`Inbound::decode`] 解码每一帧（坏帧即 [`DisconnectReason::Decode`]），再交给它投递。
 
 use std::collections::VecDeque;
-use std::io;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-use super::{Inbound, InboundError, Notification, Response};
-use crate::frame::FrameError;
-
-/// 拆掉连接的原因。所有挂起的请求以同一个原因（`Arc`）失败：调用方能做的只有重连，所以各种原因不分别报错。
-/// 流连接与 GDP 连接的断开也用它表示。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum DisconnectReason {
-    /// 本端关闭了连接（`Client` 被 drop）。
-    #[error("closed by the client")]
-    Closed,
-    /// 服务端在帧边界上关闭了连接。
-    #[error("closed by the server")]
-    Eof,
-    /// 读取失败、帧中途 EOF，或长度字段越界。
-    #[error(transparent)]
-    Read(#[from] FrameError),
-    /// 写出失败或超时（10 s）：可能只写出了半帧，字节流已不可信。
-    #[error("write failed: {0}")]
-    Write(io::Error),
-    /// 坏帧：服务端从不产生，字节流已不可信。
-    #[error(transparent)]
-    Decode(#[from] InboundError),
-}
+use super::{Inbound, Notification, Response};
+use crate::error::DisconnectReason;
 
 /// 一个请求的结果：响应，或拆连接的原因。
 pub(super) type Reply = Result<Response, Arc<DisconnectReason>>;

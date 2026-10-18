@@ -6,17 +6,18 @@ mod common;
 
 use gopxl::gdp::Body;
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
-    common::replay_enabled(client)?;
-    common::enable_gdp(client)?;
-    let mut gdp = common::connect_gdp(&system)?;
-    common::start_if_ready(&system)?;
+    common::replay_enabled(client).await?;
+    common::enable_gdp(client).await?;
+    let mut gdp = common::connect_gdp(&system).await?;
+    common::start_if_ready(&system).await?;
 
-    let data_set = gdp.receive(common::RECEIVE_TIMEOUT)?;
+    let data_set = gdp.receive(common::RECEIVE_TIMEOUT).await?;
     println!("Total number of messages: {}", data_set.len());
     for (i, message) in data_set.iter().enumerate() {
         println!("{} GDP Output Source {}", "-".repeat(64), i + 1);
@@ -32,6 +33,6 @@ fn main() -> common::Result {
     }
 
     drop(gdp);
-    system.stop()?;
+    system.stop().await?;
     Ok(())
 }

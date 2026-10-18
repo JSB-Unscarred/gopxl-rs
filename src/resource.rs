@@ -38,8 +38,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 一个资源路径及其缓存，对应 C++ 的 `GoResource`。由 [`System::resource`](crate::System::resource)、
 /// [`Resource::new`] 或父资源的 `child`、`children`、`create_child` 得到。
 ///
-/// owned、`Send`，唯一拥有自己的缓存与订阅。Drop 时订阅随之释放，写出 `unSub`、不等应答（C++ 的析构等待应答，
-/// 最多阻塞 5 s）。不让连接存活：`System` Drop 之后，请求以 `Disconnected` 失败。
+/// owned、`Send`，唯一拥有自己的缓存与订阅。[`unsubscribe`](Self::unsubscribe) 等 `unSub` 写出；Drop 时订阅随之
+/// 释放，`unSub` 交给一个 task（见 [`Subscription`]）。不让连接存活：`System` Drop 之后，请求以 `Disconnected`
+/// 失败。
 pub struct Resource {
     client: Client,
     path: String,
@@ -117,7 +118,7 @@ impl Resource {
     /// 资源的数据，对应 C++ 的 `Data` 与各 `Get*`。缓存为空或过期时读服务端，读参数为
     /// `{"expandLevel": n, "includeSchema": false}`；字段经 [`Value::pointer`] 与 `as_*` 读取。C++ 的 `Cache`（总是
     /// 重读）即 [`invalidate`](Self::invalidate) 之后 `data`。
-    pub fn data(&mut self) -> Result<&Value> {
+    pub async fn data(&mut self) -> Result<&Value> {
         self.refresh();
         let data = if let Some(data) = self.data.take() {
             data
@@ -127,7 +128,8 @@ impl Resource {
             self.read(Map::from([
                 ("expandLevel".to_owned(), Value::from(self.expand_level)),
                 ("includeSchema".to_owned(), Value::Bool(false)),
-            ]))?
+            ]))
+            .await?
         };
         Ok(self.data.insert(data))
     }
@@ -136,9 +138,9 @@ impl Resource {
     /// `GetDouble`、`GetString`、`GetProp` 等：`get::<i64>("/parameters/x")`、`get::<&str>(..)` 借用缓存、
     /// `get::<Value>(..)` 原样取值，也可以是 `#[derive(Deserialize)]` 的结构体。字段缺失或无法反序列化（类型不对、
     /// 整数越界、结构体缺字段）时报 `Payload`（C++ 抛 `GoResourceError`）。
-    pub fn get<'a, T: Deserialize<'a>>(&'a mut self, pointer: &str) -> Result<T> {
+    pub async fn get<'a, T: Deserialize<'a>>(&'a mut self, pointer: &str) -> Result<T> {
         let path = self.path.clone();
-        let value = match self.data()?.pointer(pointer) {
+        let value = match self.data().await?.pointer(pointer) {
             Some(value) => T::deserialize(value).map_err(|e| e.to_string()),
             None => Err("missing".to_owned()),
         };
@@ -167,16 +169,16 @@ impl Resource {
     ///
     /// 开启校验时，补丁中对象以外的每个值按所在位置的 schema 节点校验（与 C++ 的 `Set*` 相同；C++ 的 `SetJson` 不校验），
     /// 第一个不合格的值报 `Validation`，请求不发出。补丁只放要修改的字段：读到的整份数据含只读字段，原样写回会被拒绝。
-    pub fn update(&mut self, patch: impl Into<Value>) -> Result<()> {
+    pub async fn update(&mut self, patch: impl Into<Value>) -> Result<()> {
         let patch = patch.into();
         if self.validation {
             let cached = self.schema.is_some();
-            let mut invalid = first_invalid(self.schema()?, &patch, "");
+            let mut invalid = first_invalid(self.schema().await?, &patch, "");
             // schema 随设备状态变化（例如 materialType 决定哪些参数只读），缓存的 schema 判为不合格时重读一次再判，
             // 免得按过期的约束拒绝服务端接受的写入；合格或刚读到时不多发请求。
             if invalid.is_some() && cached {
                 self.schema = None;
-                invalid = first_invalid(self.schema()?, &patch, "");
+                invalid = first_invalid(self.schema().await?, &patch, "");
             }
             if let Some((pointer, issues)) = invalid {
                 return Err(Error::Validation {
@@ -189,34 +191,38 @@ impl Resource {
         self.client
             .update(&self.path, patch)
             .timeout(self.timeout)
-            .response()?;
+            .response()
+            .await?;
         Ok(())
     }
 
     /// 把 `pointer` 处设为 `value` 并发送，对应 C++ 的各 `Set*`；即只含这一个值的 [`update`](Self::update)，没有延迟写。
-    pub fn set(&mut self, pointer: &str, value: impl Into<Value>) -> Result<()> {
+    pub async fn set(&mut self, pointer: &str, value: impl Into<Value>) -> Result<()> {
         let mut patch = Value::object();
         // 从空对象出发只会创建对象，不会失败。
         let _ = patch.set(pointer, value);
-        self.update(patch)
+        self.update(patch).await
     }
 
     /// 资源的 `_schema`，对应 C++ 的 `Schema`。缓存为空时读一次（读参数 `{"includeSchema": true}`），只更新 schema
     /// 缓存；响应没有 `_schema` 时为 `Nil`。子节点经 [`schema::schema_for_path`] 取得（C++ 的 `SchemaFor`）。
-    pub fn schema(&mut self) -> Result<&Value> {
+    pub async fn schema(&mut self) -> Result<&Value> {
         let schema = if let Some(schema) = self.schema.take() {
             schema
         } else {
             let args = Map::from([("includeSchema".to_owned(), Value::Bool(true))]);
-            self.read(args)?.remove("/_schema").unwrap_or_default()
+            self.read(args)
+                .await?
+                .remove("/_schema")
+                .unwrap_or_default()
         };
         Ok(self.schema.insert(schema))
     }
 
     /// 用 `pointer` 处的 schema 节点校验 `value`，不发送，对应 C++ 的 `Validate`；空表即通过，schema 中没有这个
     /// 位置时不约束。用的是缓存的 schema，设备状态改变之后可能过期，需要时先 [`invalidate`](Self::invalidate)。
-    pub fn validate(&mut self, pointer: &str, value: &Value) -> Result<Vec<String>> {
-        let node = schema::schema_for_path(self.schema()?, pointer);
+    pub async fn validate(&mut self, pointer: &str, value: &Value) -> Result<Vec<String>> {
+        let node = schema::schema_for_path(self.schema().await?, pointer);
         Ok(node
             .map(|node| schema::validate(value, node))
             .unwrap_or_default())
@@ -231,8 +237,8 @@ impl Resource {
 
     /// `_embedded` 中关系 `rel`（见 [`rel`]）各条目的 `_links.self.href`，对应 C++ 的 `ChildUris`；`ChildCount` 即
     /// 其长度。缺少 href 的条目跳过。
-    pub fn child_paths(&mut self, rel: &str) -> Result<Vec<String>> {
-        let data = self.data()?;
+    pub async fn child_paths(&mut self, rel: &str) -> Result<Vec<String>> {
+        let data = self.data().await?;
         let paths = entries(&data["_embedded"][rel]).iter().filter_map(href);
         Ok(paths.map(str::to_owned).collect())
     }
@@ -242,14 +248,14 @@ impl Resource {
     /// 展开层级不为 0 时条目就是子资源的数据（服务端按请求的 `expandLevel` 展开），直接放进子资源的缓存，子资源的
     /// 展开层级取服务端渲染条目用的下一层（−1 不变，n > 0 为 n − 1，其他为 0，协议假设 R1），缓存与层级一致。C++ 按
     /// 条目的键数猜测是否已展开，把带 `ordIndex` 的链接也当作数据放进缓存。
-    pub fn children(&mut self, rel: &str) -> Result<Vec<Resource>> {
+    pub async fn children(&mut self, rel: &str) -> Result<Vec<Resource>> {
         let expanded = self.expand_level != 0;
         let expand_level = match self.expand_level {
             -1 => -1,
             n if n > 0 => n - 1,
             _ => 0,
         };
-        let found: Vec<_> = entries(&self.data()?["_embedded"][rel])
+        let found: Vec<_> = entries(&self.data().await?["_embedded"][rel])
             .iter()
             .filter_map(|item| Some((href(item)?.to_owned(), expanded.then(|| item.clone()))))
             .collect();
@@ -264,9 +270,9 @@ impl Resource {
 
     /// 在本集合中创建子资源（`create`），对应 C++ 的 `CreateChild`。新资源的路径取响应载荷的 `path`，没有时取
     /// `_links.self.href`，都没有时报 `Payload`（响应形态是协议假设 R2）。
-    pub fn create_child(&self, args: impl Into<Value>) -> Result<Resource> {
+    pub async fn create_child(&self, args: impl Into<Value>) -> Result<Resource> {
         let response = self.client.create(&self.path, args);
-        let payload = response.timeout(self.timeout).response()?.payload;
+        let payload = response.timeout(self.timeout).response().await?.payload;
         let path = [payload["path"].as_str(), href(&payload)]
             .into_iter()
             .flatten()
@@ -282,12 +288,13 @@ impl Resource {
     /// 删除本资源，对应 C++ 的 `Delete`、`DeleteChild`；已经不存在（`notFound`）也算成功。消耗 `self`，删除之后
     /// 不能再用它。删除子项用 `children` 得到的资源，或对 `child_paths` 返回的绝对路径 `Resource::new`；`child` 只接受
     /// 相对路径。
-    pub fn delete(self) -> Result<()> {
+    pub async fn delete(self) -> Result<()> {
         match self
             .client
             .delete(&self.path)
             .timeout(self.timeout)
             .response()
+            .await
         {
             Err(Error::Request(e)) if e.response.status == Status::NOT_FOUND => Ok(()),
             result => result.map(|_| ()),
@@ -313,14 +320,14 @@ impl Resource {
     }
 
     /// `_links` 中 `go:command` 各链接 href 的最后一段，对应 C++ 的 `CommandNames`。
-    pub fn command_names(&mut self) -> Result<Vec<String>> {
-        self.link_names(&[rel::COMMAND])
+    pub async fn command_names(&mut self) -> Result<Vec<String>> {
+        self.link_names(&[rel::COMMAND]).await
     }
 
     /// 动作名，对应 C++ 的 `ActionNames`；同时读 `go:action` 与 `go:actions`（手册中传感器的例子用复数，C++ 只认
     /// 单数）。
-    pub fn action_names(&mut self) -> Result<Vec<String>> {
-        self.link_names(&[rel::ACTION, "go:actions"])
+    pub async fn action_names(&mut self) -> Result<Vec<String>> {
+        self.link_names(&[rel::ACTION, "go:actions"]).await
     }
 
     /// 订阅本资源及其后代的变更（表达式 `<路径>/*`），对应 C++ 的 `Subscribe`；已订阅时什么也不做。之后其他客户端与
@@ -329,9 +336,9 @@ impl Resource {
     /// C++ 订阅精确路径，收不到子项的 `created` / `deleted`（`*` 的投递是协议假设 S3）。通知总是带
     /// 规范路径，所以以 `extId=` 访问的资源、不是规范路径（不以 `/` 开头或有空段）的资源都收不到通知：订阅
     /// `create_child`、`children` 得到的资源。订阅之前的修改没有通知，所以订阅时丢弃数据缓存。
-    pub fn subscribe(&mut self) -> Result<()> {
+    pub async fn subscribe(&mut self) -> Result<()> {
         if self.subscription.is_none() {
-            self.subscription = Some(self.client.subscribe(&self.join("*"))?);
+            self.subscription = Some(self.client.subscribe(&self.join("*")).await?);
             self.data = None;
         }
         Ok(())
@@ -347,10 +354,14 @@ impl Resource {
         )
     }
 
-    /// 取消订阅，对应 C++ 的 `Unsubscribe`：丢弃订阅，写出 `unSub`、不等应答。先取空队列，已到达的通知照样使缓存过期。
-    pub fn unsubscribe(&mut self) {
+    /// 取消订阅，对应 C++ 的 `Unsubscribe`：等 `unSub` 写出、不等应答（见 [`Subscription::unsubscribe`]）；未订阅时
+    /// 什么也不做。先取空队列，已到达的通知照样使缓存过期。
+    pub async fn unsubscribe(&mut self) -> Result<()> {
         self.refresh();
-        self.subscription = None;
+        match self.subscription.take() {
+            Some(subscription) => subscription.unsubscribe().await,
+            None => Ok(()),
+        }
     }
 
     /// 是否已订阅，对应 C++ 的 `IsSubscribed`。
@@ -375,23 +386,28 @@ impl Resource {
         }
         if let Some(subscription) = &self.subscription {
             // 通知与 `Lagged` 都说明资源可能变了。
-            while let Ok(Some(_)) = subscription.recv_timeout(Duration::ZERO) {
+            while let Ok(Some(_)) = subscription.try_recv() {
                 self.data = None;
             }
         }
     }
 
     /// 以读参数 `args` 读本资源，返回载荷。
-    fn read(&self, args: Map) -> Result<Value> {
+    async fn read(&self, args: Map) -> Result<Value> {
         let mut request = Request::new(Method::Read, self.path.clone());
         request.args = args.into();
-        let response = self.client.send(request).timeout(self.timeout).response()?;
+        let response = self
+            .client
+            .send(request)
+            .timeout(self.timeout)
+            .response()
+            .await?;
         Ok(response.payload)
     }
 
     /// `_links` 中各关系 `rels` 的链接 href 的最后一段；没有 `/` 或最后一段为空的 href 跳过（同 C++）。
-    fn link_names(&mut self, rels: &[&str]) -> Result<Vec<String>> {
-        let links = &self.data()?["_links"];
+    async fn link_names(&mut self, rels: &[&str]) -> Result<Vec<String>> {
+        let links = &self.data().await?["_links"];
         let names = rels
             .iter()
             .flat_map(|rel| entries(&links[*rel]))

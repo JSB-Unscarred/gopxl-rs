@@ -15,12 +15,13 @@ use gopxl::Value;
 
 const SENSOR_2_SERIAL_NO: &str = "62984";
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
-    let engine = client.read(common::ENGINE_PATH).response()?.payload;
+    let engine = client.read(common::ENGINE_PATH).response().await?.payload;
     // 同 GoJson::Empty（nlohmann 的 empty()）：只有 null 与空容器算空。HAL 只嵌入一项时可能是对象而不是数组
     // （如 /controls/gocator 的 go:datasources）。
     let empty = match &engine["_embedded"]["go:scanner"] {
@@ -33,7 +34,8 @@ fn main() -> common::Result {
         println!("Scanner not present, creating scanner");
         client
             .create(common::SCANNERS_PATH, Value::object())
-            .response()?;
+            .response()
+            .await?;
     } else {
         println!("A Sensor Group exists.");
     }
@@ -42,10 +44,13 @@ fn main() -> common::Result {
     println!("Adding sensor {serial} to the sensor group...");
     let mut payload = Value::object();
     payload.set("/serialNumber", serial)?;
-    client.create(common::SENSORS_PATH, payload).response()?;
+    client
+        .create(common::SENSORS_PATH, payload)
+        .response()
+        .await?;
 
     let layout_path = format!("{}/layout", common::SCANNER_PATH);
-    let mut layout = client.read(&layout_path).response()?.payload;
+    let mut layout = client.read(&layout_path).response().await?.payload;
     print_layout(&layout)?;
 
     // orientation：0 正向、1 反向；row：0 上排（A）、1 下排（B）；column：列序号。
@@ -53,14 +58,14 @@ fn main() -> common::Result {
     layout.set("/grid/sensors/1/column", 1)?;
     layout.set("/grid/sensors/1/orientation", 0)?;
     println!("Updating sensor layout...");
-    client.update(&layout_path, layout).response()?;
+    client.update(&layout_path, layout).response().await?;
 
-    print_layout(&client.read(&layout_path).response()?.payload)?;
+    print_layout(&client.read(&layout_path).response().await?.payload)?;
 
     // 第二台传感器加入后的资源。
     let sensor_1 = format!("{}/sensor-1", common::SENSORS_PATH);
     println!("Removing {sensor_1} from sensor group...");
-    client.delete(&sensor_1).response()?;
+    client.delete(&sensor_1).response().await?;
     Ok(())
 }
 

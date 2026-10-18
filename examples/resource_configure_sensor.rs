@@ -20,22 +20,28 @@ use common::{
 use gopxl::resource::rel;
 use gopxl::{System, Value};
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let mut scanner = system.resource(SCANNER_PATH);
     let mut sensor = system.resource(SENSOR_PATH);
 
     section("Configuration 1: Update trigger source.");
     println!("Setting scanner trigger source to \"Software\"...");
-    scanner.set(TRIGGER_SOURCE_PATH, TRIGGER_MODE_SOFTWARE)?;
-    let source = scanner.get::<i64>(TRIGGER_SOURCE_PATH)?;
+    scanner
+        .set(TRIGGER_SOURCE_PATH, TRIGGER_MODE_SOFTWARE)
+        .await?;
+    let source = scanner.get::<i64>(TRIGGER_SOURCE_PATH).await?;
     println!("Trigger source: {source}");
 
-    system.start()?;
+    system.start().await?;
     println!("Triggering scan using software...");
-    scanner.action("trigger", Value::object()).response()?;
-    system.stop()?;
+    scanner
+        .action("trigger", Value::object())
+        .response()
+        .await?;
+    system.stop().await?;
 
     section("Configuration 2: Update single exposure.");
     println!("Setting single exposure to 1200...");
@@ -43,8 +49,8 @@ fn main() -> common::Result {
     let mut patch = Value::object();
     patch.set(EXPOSURE_MODE_PATH, EXPOSURE_MODE_SINGLE)?;
     patch.set(SINGLE_EXPOSURE_PATH, 1200)?;
-    sensor.update(patch)?;
-    let exposure = sensor.get::<Value>(SINGLE_EXPOSURE_PATH)?;
+    sensor.update(patch).await?;
+    let exposure = sensor.get::<Value>(SINGLE_EXPOSURE_PATH).await?;
     println!("Exposure value: {exposure}");
 
     section("Configuration 3: Update multiple exposures.");
@@ -55,55 +61,58 @@ fn main() -> common::Result {
         MULTI_EXPOSURE_PATH,
         [1080, 2010, 5040].map(Value::from).to_vec(),
     )?;
-    sensor.update(patch)?;
-    let exposures = sensor.get::<Value>(MULTI_EXPOSURE_PATH)?;
+    sensor.update(patch).await?;
+    let exposures = sensor.get::<Value>(MULTI_EXPOSURE_PATH).await?;
     println!("Multi-exposure values: {exposures}");
 
     section("Configuration 4: Update sensor name.");
     println!("Setting display name...");
-    sensor.set("/displayName", "Main-Sensor-Change")?;
-    let name = sensor.get::<&str>("/displayName")?;
+    sensor.set("/displayName", "Main-Sensor-Change").await?;
+    let name = sensor.get::<&str>("/displayName").await?;
     println!("Display name: {name}");
 
     section("Configuration 5: Change the active area.");
     println!("Updating active area...");
-    sensor.set(&format!("{ACTIVE_AREA_PATH}/width"), 3.5)?;
-    let area = sensor.get::<Value>(ACTIVE_AREA_PATH)?;
+    sensor
+        .set(&format!("{ACTIVE_AREA_PATH}/width"), 3.5)
+        .await?;
+    let area = sensor.get::<Value>(ACTIVE_AREA_PATH).await?;
     println!("Active area: {area}");
 
     section("Configuration 6: Enable, trigger, and configure Digital Output.");
-    configure_digital_output(&system)?;
+    configure_digital_output(&system).await?;
 
     section("Configuration 7: Read network configuration.");
     let mut ip_config = system.resource(common::IP_CONFIG_PATH);
-    let interfaces = ip_config.get::<Value>("/interfaces")?;
+    let interfaces = ip_config.get::<Value>("/interfaces").await?;
     println!("Network configurations: {interfaces}.");
     Ok(())
 }
 
 /// 开启数字输出，设备列表为空时加入第一个可用设备，把第一个设备 port-0 的触发事件设为软件，再触发脉冲。
-fn configure_digital_output(system: &System) -> common::Result {
+async fn configure_digital_output(system: &System) -> common::Result {
     let mut digital_output = system.resource(DIGITAL_OUTPUT_PATH);
     println!("Enabling Digital Output...");
-    digital_output.set("/enabled", true)?;
+    digital_output.set("/enabled", true).await?;
 
     // 设备列表为空时加入第一个可用设备（C++ 的 `ChildCount` 与 `CreateChild`）。
     let mut devices = digital_output.child("devices");
-    if devices.child_paths(rel::ITEM)?.is_empty() {
+    if devices.child_paths(rel::ITEM).await?.is_empty() {
         println!("\nAdding device to Digital Output...");
         let mut available = digital_output.child("availableDevices");
-        let device = available.get::<Value>("/devices/0")?;
-        devices.create_child(device)?;
+        let device = available.get::<Value>("/devices/0").await?;
+        devices.create_child(device).await?;
     }
 
     // 添加过设备时缓存已过期，这里重新读设备列表。
-    let paths = devices.child_paths(rel::ITEM)?;
+    let paths = devices.child_paths(rel::ITEM).await?;
     let device = paths.first().ok_or("Digital Output has no device")?;
     let mut port = system.resource(format!("{device}/ports/port-0"));
 
     println!("Setting digital output trigger event to Software...");
-    port.set(DIO_TRIGGER_EVENT_PATH, DIO_TRIGGER_SOFTWARE)?;
-    let event = port.get::<i64>(DIO_TRIGGER_EVENT_PATH)?;
+    port.set(DIO_TRIGGER_EVENT_PATH, DIO_TRIGGER_SOFTWARE)
+        .await?;
+    let event = port.get::<i64>(DIO_TRIGGER_EVENT_PATH).await?;
     let name = trigger_event_name(event)
         .ok_or_else(|| format!("unknown digital output trigger event {event}"))?;
     println!("Digital output trigger event: {name}");
@@ -112,18 +121,19 @@ fn configure_digital_output(system: &System) -> common::Result {
     // target：定时脉冲的时间（µs）或编码器位置（mm）；value：true 为高电平。
     println!("\nTriggering single non-scheduled pulse...");
     let args = r#"{"parameter":{"target":0,"value":true}}"#.parse::<Value>()?;
-    if let Err(e) = port.command("trigger", args).response() {
+    if let Err(e) = port.command("trigger", args).response().await {
         eprintln!("Error: {e}");
         eprintln!("Failed to trigger digital output pulse.");
     }
 
     // signalType：0 为脉冲，1 为连续。
     println!("\nChanging configurations for a continuous scheduled pulse...");
-    port.update(r#"{"parameters":{"signalType":1,"scheduled":true}}"#.parse::<Value>()?)?;
+    port.update(r#"{"parameters":{"signalType":1,"scheduled":true}}"#.parse::<Value>()?)
+        .await?;
 
     println!("Triggering continuous scheduled pulse...");
     let args = r#"{"parameter":{"target":0}}"#.parse::<Value>()?;
-    if let Err(e) = port.command("trigger", args).response() {
+    if let Err(e) = port.command("trigger", args).response().await {
         eprintln!("Error: {e}");
         eprintln!("Failed to trigger continuous scheduled pulse.");
     }

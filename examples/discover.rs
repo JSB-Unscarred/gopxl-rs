@@ -16,8 +16,9 @@ use gopxl::discovery::{self, Instance};
 /// 实例上可见的传感器。
 const VISIBLE_SENSORS_PATH: &str = "/scan/visibleSensors/";
 
-fn main() -> common::Result {
-    let instances = discovery::discover(common::DISCOVER_TIMEOUT)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let instances = discovery::discover(common::DISCOVER_TIMEOUT).await?;
     println!("Number of sensors on the network: {}", instances.len());
     if instances.is_empty() {
         return Err(
@@ -32,8 +33,8 @@ fn main() -> common::Result {
         let Some(addr) = instance.control_addr() else {
             continue;
         };
-        let system = System::connect(addr.into())?;
-        if let Err(e) = print_sensors(&system) {
+        let system = System::connect(addr.into()).await?;
+        if let Err(e) = print_sensors(&system).await {
             println!("Error: {e}");
         }
     }
@@ -81,9 +82,9 @@ fn print_instance(number: usize, instance: &Instance) {
 }
 
 /// 打印实例可见、且在它的扫描引擎下有资源路径的传感器。网关、掩码与 DHCP 取自实例自身的第一块网卡（与 C++ 相同）。
-fn print_sensors(system: &System) -> common::Result {
+async fn print_sensors(system: &System) -> common::Result {
     let client = system.client();
-    let visible = client.read(VISIBLE_SENSORS_PATH).response()?.payload;
+    let visible = client.read(VISIBLE_SENSORS_PATH).response().await?.payload;
     let sensors = visible["sensors"].as_array().unwrap_or_default();
     if sensors.is_empty() {
         return Err(
@@ -92,14 +93,18 @@ fn print_sensors(system: &System) -> common::Result {
     }
 
     // 网卡配置属于本实例，与传感器无关，读一次。
-    let ip_config = client.read(common::IP_CONFIG_PATH).response()?.payload;
+    let ip_config = client
+        .read(common::IP_CONFIG_PATH)
+        .response()
+        .await?
+        .payload;
     let interface = &ip_config["interfaces"][0];
     let mut count = 0;
     for sensor in sensors {
         let serial = sensor["serialNumber"]
             .as_str()
             .ok_or("visible sensor has no \"serialNumber\"")?;
-        let Some(sensor_path) = system.sensor_path(serial)? else {
+        let Some(sensor_path) = system.sensor_path(serial).await? else {
             continue;
         };
         count += 1;

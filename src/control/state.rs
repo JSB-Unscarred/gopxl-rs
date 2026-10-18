@@ -1,9 +1,10 @@
-//! 主连接的协议状态机 [`ControlCore`]（纯逻辑，不做 I/O、不起线程）：按 FIFO 把响应交给请求。连接层在锁外用
+//! 主连接的协议状态机 [`ControlCore`]（纯逻辑，不做 I/O、不起任务）：按 FIFO 把响应交给请求。连接层在锁外用
 //! [`Inbound::decode`] 解码每一帧（坏帧即 [`DisconnectReason::Decode`]），再交给它投递。
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+use tokio::sync::oneshot;
 
 use super::{Inbound, Notification, Response};
 use crate::error::DisconnectReason;
@@ -14,7 +15,7 @@ pub(super) type Reply = Result<Response, Arc<DisconnectReason>>;
 /// 一个请求的应答接收端，由 [`ControlCore::register`] 返回。
 ///
 /// 调用方超时即丢弃它：槽位成为墓碑，照样占住 FIFO 中的位置吸收迟到的响应，后面的请求仍拿到自己的响应。
-pub(super) type ReplyRx = Receiver<Reply>;
+pub(super) type ReplyRx = oneshot::Receiver<Reply>;
 
 /// 主连接的 FIFO 对应器，取代 C++ `GoRestClient` 的事务队列。
 ///
@@ -24,15 +25,15 @@ pub(super) type ReplyRx = Receiver<Reply>;
 /// 主连接上没有它们；挂起队列为空时到达的响应不属于任何请求，与 C++ 一样丢弃。
 #[derive(Debug, Default)]
 pub(super) struct ControlCore {
-    pending: VecDeque<SyncSender<Reply>>,
+    pending: VecDeque<oneshot::Sender<Reply>>,
 }
 
 impl ControlCore {
     /// 登记即将写出的请求并返回它的应答接收端；必须在它的第一个字节写出之前调用。
     ///
-    /// 通道在这里建立：容量 1，且每个槽位只发送一次（应答或 `fail_all`），所以读线程持锁 `send` 时从不阻塞。
+    /// 通道在这里建立：每个槽位只发送一次（应答或 `fail_all`），`oneshot` 的 `send` 从不等待。
     pub(super) fn register(&mut self) -> ReplyRx {
-        let (tx, rx) = sync_channel(1);
+        let (tx, rx) = oneshot::channel();
         self.pending.push_back(tx);
         rx
     }
@@ -64,9 +65,9 @@ impl ControlCore {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::mpsc::TryRecvError;
 
     use bytes::Bytes;
+    use tokio::sync::oneshot::error::TryRecvError;
 
     use super::{ControlCore, DisconnectReason};
     use crate::control::Inbound;
@@ -91,7 +92,7 @@ mod tests {
     fn tombstone_absorbs_late_response() {
         let mut core = ControlCore::default();
         drop(core.register());
-        let b = core.register();
+        let mut b = core.register();
 
         let notify = inbound(r#"{"type":"notification","eventType":"updated","path":"/a"}"#);
         assert!(core.on_inbound(notify).is_some());
@@ -119,9 +120,9 @@ mod tests {
         let receivers: Vec<_> = (0..3).map(|_| core.register()).collect();
         let reason = Arc::new(DisconnectReason::Closed);
         core.fail_all(&reason);
-        for rx in &receivers {
+        for mut rx in receivers {
             assert!(Arc::ptr_eq(&rx.try_recv().unwrap().unwrap_err(), &reason));
-            assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Closed)));
         }
     }
 }

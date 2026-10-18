@@ -21,15 +21,17 @@ const FRAMERATE_PATH: &str = "/parameters/triggerSettings/frameRate";
 const MAX_FRAMERATE_PATH: &str = "/parameters/triggerSettings/maxFrameRateEnabled";
 const FRAMERATE: i64 = 10;
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
     println!("Enabling recording...");
     client
         .update(RECORDING_PATH, r#"{"enabled":true}"#.parse::<Value>()?)
-        .response()?;
+        .response()
+        .await?;
 
     println!("Setting frame rate to {FRAMERATE}...");
     let mut params = Value::object();
@@ -38,18 +40,22 @@ fn main() -> common::Result {
     // 先关闭 maxFrameRateEnabled 再设帧率：开启时有的扫描引擎把 frameRate 设为只读。
     client
         .update(common::SCANNER_PATH, params.clone())
-        .response()?;
+        .response()
+        .await?;
     params.set(FRAMERATE_PATH, FRAMERATE)?;
-    client.update(common::SCANNER_PATH, params).response()?;
+    client
+        .update(common::SCANNER_PATH, params)
+        .response()
+        .await?;
 
-    common::start_if_ready(&system)?;
-    std::thread::sleep(Duration::from_millis(500));
-    system.stop()?;
+    common::start_if_ready(&system).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    system.stop().await?;
 
     // 只含当前作业与回放数据的归档就是录制文件。
     let contents = r#"{"contents":["liveJob","replay"]}"#.parse::<Value>()?;
-    let recording_file = common::download_archive(client, &contents, RECORDING_FILE)?;
-    common::restore_archive(client, contents, &recording_file)?;
+    let recording_file = common::download_archive(client, &contents, RECORDING_FILE).await?;
+    common::restore_archive(client, contents, &recording_file).await?;
 
     println!("Enabling replay...");
     client
@@ -57,16 +63,18 @@ fn main() -> common::Result {
             REPLAY_PATH,
             r#"{"enabled":true,"frameRate":5}"#.parse::<Value>()?,
         )
-        .response()?;
+        .response()
+        .await?;
 
-    let frame_count = common::read_at(client, "/replay", "/frameCount")?
+    let frame_count = common::read_at(client, "/replay", "/frameCount")
+        .await?
         .as_i64()
         .ok_or("/replay frameCount is not an integer")?;
     println!("Number of frames in recording: {frame_count}");
 
     // 开始并立即停止回放。
-    system.start()?;
-    system.stop()?;
+    system.start().await?;
+    system.stop().await?;
 
     if frame_count <= 0 {
         println!("Number of frames is zero - Cannot jump to specific frame");
@@ -75,7 +83,7 @@ fn main() -> common::Result {
         seek.set("positionDomain", 0)?;
         // position 从 0 开始。
         seek.set("position", frame_count - 1)?;
-        client.call(REPLAY_SEEK_PATH, seek).response()?;
+        client.call(REPLAY_SEEK_PATH, seek).response().await?;
         println!("Frame changed to {frame_count}");
     }
     Ok(())

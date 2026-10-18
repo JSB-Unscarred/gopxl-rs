@@ -10,11 +10,12 @@ mod common;
 
 use gopxl::Value;
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     // 修改配置之前先停止。
-    system.stop()?;
+    system.stop().await?;
     let client = system.client();
 
     client
@@ -22,29 +23,31 @@ fn main() -> common::Result {
             common::SENSOR_2D_PATH,
             r#"{"parameters":{"generalSettings":{"exposure":10.0}}}"#.parse::<Value>()?,
         )
-        .response()?;
+        .response()
+        .await?;
 
     client
         .create(
             "/tools/",
             r#"{"type":"ImageFilter","autoConnect":true,"position":0}"#.parse::<Value>()?,
         )
-        .response()?;
+        .response()
+        .await?;
     println!("New tool added: ImageFilter");
 
-    common::enable_gdp(client)?;
-    common::add_output(client, "scan:2dscanner:scanner-0:image", 0)?;
+    common::enable_gdp(client).await?;
+    common::add_output(client, "scan:2dscanner:scanner-0:image", 0).await?;
     println!("Added image to the Gocator Protocol output.");
 
-    let mut gdp = common::connect_gdp(&system)?;
+    let mut gdp = common::connect_gdp(&system).await?;
     println!("Gocator Protocol connected.");
-    common::start_if_ready(&system)?;
+    common::start_if_ready(&system).await?;
 
-    let data_set = common::wait_for_image(&mut gdp)?;
+    let data_set = common::wait_for_image(&mut gdp).await?;
     common::print_image_set(&data_set, None)?;
 
     drop(gdp);
-    system.stop()?;
+    system.stop().await?;
     println!("System stopped.");
     Ok(())
 }

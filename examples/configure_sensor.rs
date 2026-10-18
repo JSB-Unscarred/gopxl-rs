@@ -20,9 +20,10 @@ use gopxl::control::Client;
 
 const DIGITAL_OUTPUT_PORT_PATH: &str = "/controls/digitalOutput/devices/device-0/ports/port-0";
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
     section("Configuration 1: Update trigger source.");
@@ -30,22 +31,23 @@ fn main() -> common::Result {
     let mut payload = Value::object();
     payload.set(TRIGGER_SOURCE_PATH, TRIGGER_MODE_SOFTWARE)?;
     println!("Setting scanner trigger source to \"Software\"...");
-    client.update(SCANNER_PATH, payload).response()?;
+    client.update(SCANNER_PATH, payload).response().await?;
 
-    system.start()?;
+    system.start().await?;
     println!("Triggering scan using software...");
     client
         .call(&format!("{SCANNER_PATH}/actions/trigger"), Value::object())
-        .response()?;
-    system.stop()?;
+        .response()
+        .await?;
+    system.stop().await?;
 
     section("Configuration 2: Update single exposure.");
     let mut payload = Value::object();
     payload.set(EXPOSURE_MODE_PATH, EXPOSURE_MODE_SINGLE)?;
     payload.set(SINGLE_EXPOSURE_PATH, 1200)?;
     println!("Setting single exposure to 1200...");
-    client.update(SENSOR_PATH, payload).response()?;
-    let exposure = common::read_at(client, SENSOR_PATH, SINGLE_EXPOSURE_PATH)?;
+    client.update(SENSOR_PATH, payload).response().await?;
+    let exposure = common::read_at(client, SENSOR_PATH, SINGLE_EXPOSURE_PATH).await?;
     println!("Exposure value: {exposure}");
 
     section("Configuration 3: Update multiple exposures.");
@@ -56,15 +58,15 @@ fn main() -> common::Result {
         [1080, 2010, 5040].map(Value::from).to_vec(),
     )?;
     println!("Setting multiple exposures...");
-    client.update(SENSOR_PATH, payload).response()?;
-    let exposures = common::read_at(client, SENSOR_PATH, MULTI_EXPOSURE_PATH)?;
+    client.update(SENSOR_PATH, payload).response().await?;
+    let exposures = common::read_at(client, SENSOR_PATH, MULTI_EXPOSURE_PATH).await?;
     println!("Multi-exposure values: {exposures}");
 
     section("Configuration 4: Update sensor name.");
     println!("Setting display name...");
     let payload = r#"{"displayName":"Main-Sensor-Change"}"#.parse::<Value>()?;
-    client.update(SENSOR_PATH, payload).response()?;
-    let name = common::read_at(client, SENSOR_PATH, "/displayName")?;
+    client.update(SENSOR_PATH, payload).response().await?;
+    let name = common::read_at(client, SENSOR_PATH, "/displayName").await?;
     println!("Display name: {name}");
 
     section("Configuration 5: Change the active area.");
@@ -72,38 +74,45 @@ fn main() -> common::Result {
     let mut payload = Value::object();
     payload.set(&format!("{ACTIVE_AREA_PATH}/width"), 3.5)?;
     println!("Updating active area...");
-    client.update(SENSOR_PATH, payload).response()?;
-    let area = common::read_at(client, SENSOR_PATH, ACTIVE_AREA_PATH)?;
+    client.update(SENSOR_PATH, payload).response().await?;
+    let area = common::read_at(client, SENSOR_PATH, ACTIVE_AREA_PATH).await?;
     println!("Active area: {area}");
 
     section("Configuration 6: Enable, trigger, and configure Digital Output.");
-    configure_digital_output(client)?;
+    configure_digital_output(client).await?;
 
     section("Configuration 7: Update network configuration.");
-    let interfaces = common::read_at(client, common::IP_CONFIG_PATH, "/interfaces")?;
+    let interfaces = common::read_at(client, common::IP_CONFIG_PATH, "/interfaces").await?;
     println!("Network configurations: {interfaces}.");
     // 改 IP：把读到的载荷中 /interfaces/0/ipAddress 改为新地址后 update IP_CONFIG_PATH，之后用新地址连接。
     Ok(())
 }
 
 /// 开启数字输出，没有输出设备时加入第一个可用设备，把 port-0 的触发事件设为软件，再触发脉冲。
-fn configure_digital_output(client: &Client) -> common::Result {
+async fn configure_digital_output(client: &Client) -> common::Result {
     println!("Enabling Digital Output...");
     let payload = r#"{"enabled":true}"#.parse::<Value>()?;
-    client.update(DIGITAL_OUTPUT_PATH, payload).response()?;
+    client
+        .update(DIGITAL_OUTPUT_PATH, payload)
+        .response()
+        .await?;
 
     let devices_path = format!("{DIGITAL_OUTPUT_PATH}/devices");
-    let devices = client.read(&devices_path).response()?.payload;
+    let devices = client.read(&devices_path).response().await?.payload;
     if devices.pointer("/_embedded").is_none() {
         println!("\nAdding device to Digital Output...");
         let available = client
             .read(&format!("{DIGITAL_OUTPUT_PATH}/availableDevices"))
-            .response()?
+            .response()
+            .await?
             .payload;
         let device = available
             .pointer("/devices/0")
             .ok_or("no available digital output device")?;
-        client.create(&devices_path, device.clone()).response()?;
+        client
+            .create(&devices_path, device.clone())
+            .response()
+            .await?;
     }
 
     let mut payload = Value::object();
@@ -111,8 +120,9 @@ fn configure_digital_output(client: &Client) -> common::Result {
     println!("Setting digital output trigger event to Software...");
     client
         .update(DIGITAL_OUTPUT_PORT_PATH, payload)
-        .response()?;
-    let event = common::read_at(client, DIGITAL_OUTPUT_PORT_PATH, DIO_TRIGGER_EVENT_PATH)?;
+        .response()
+        .await?;
+    let event = common::read_at(client, DIGITAL_OUTPUT_PORT_PATH, DIO_TRIGGER_EVENT_PATH).await?;
     let name = event
         .as_i64()
         .and_then(trigger_event_name)
@@ -124,16 +134,21 @@ fn configure_digital_output(client: &Client) -> common::Result {
     // target：定时脉冲的时间（µs）或编码器位置（mm）；value：true 为高电平。
     println!("\nTriggering single non-scheduled pulse...");
     let payload = r#"{"parameter":{"target":0,"value":true}}"#.parse::<Value>()?;
-    report(client.call(&trigger_path, payload).response());
+    report(client.call(&trigger_path, payload).response().await);
 
     // signalType：0 为脉冲，1 为连续；scheduled：true 时推迟到 target 指定的时间或位置。
     println!("\nChanging configurations for a continuous scheduled pulse...");
     let payload = r#"{"parameters":{"signalType":1,"scheduled":true}}"#.parse::<Value>()?;
-    report(client.update(DIGITAL_OUTPUT_PORT_PATH, payload).response());
+    report(
+        client
+            .update(DIGITAL_OUTPUT_PORT_PATH, payload)
+            .response()
+            .await,
+    );
 
     println!("Triggering continuous scheduled pulse...");
     let payload = r#"{"parameter":{"target":0}}"#.parse::<Value>()?;
-    report(client.call(&trigger_path, payload).response());
+    report(client.call(&trigger_path, payload).response().await);
     Ok(())
 }
 

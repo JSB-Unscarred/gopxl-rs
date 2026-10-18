@@ -40,9 +40,9 @@ pub enum RunState {
 
 impl System {
     /// 连接 `addr`（超时 1 s，见 [`Connection::connect`]），对应 C++ 的 `GoSystem(address, port)` 加 `Connect`。
-    pub fn connect(addr: SocketAddr) -> Result<Self> {
+    pub async fn connect(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
-            connection: Connection::connect(addr)?,
+            connection: Connection::connect(addr).await?,
         })
     }
 
@@ -61,24 +61,24 @@ impl System {
 
     /// 连接设备的 GDP 服务端（地址同主连接，端口见 [`gdp_port`](Self::gdp_port)，超时 5 s），对应官方示例
     /// `SampleUtils` 里连接 `GoGdpClient` 的写法。
-    pub fn gdp(&self) -> Result<gdp::Client> {
-        let addr = SocketAddr::new(self.client().addr().ip(), self.gdp_port()?);
-        gdp::Client::connect(addr)
+    pub async fn gdp(&self) -> Result<gdp::Client> {
+        let addr = SocketAddr::new(self.client().addr().ip(), self.gdp_port().await?);
+        gdp::Client::connect(addr).await
     }
 
     /// 启动设备：`call /system/commands/start`。
-    pub fn start(&self) -> Result<()> {
-        self.command("start")
+    pub async fn start(&self) -> Result<()> {
+        self.command("start").await
     }
 
     /// 停止设备：`call /system/commands/stop`。
-    pub fn stop(&self) -> Result<()> {
-        self.command("stop")
+    pub async fn stop(&self) -> Result<()> {
+        self.command("stop").await
     }
 
     /// 运行状态：`read /system` 的 `runState`，对应 C++ 的 `RunningState`。
-    pub fn running_state(&self) -> Result<RunState> {
-        Ok(match self.res("/system").get::<i64>("/runState")? {
+    pub async fn running_state(&self) -> Result<RunState> {
+        Ok(match self.res("/system").get::<i64>("/runState").await? {
             0 => RunState::Ready,
             1 => RunState::Running,
             2 => RunState::Conflict,
@@ -88,36 +88,38 @@ impl System {
 
     /// 开启或关闭快速编辑：`update /system {"quickEditEnabled": enabled}`，对应 C++ 的 `EnableQuickEdit` /
     /// `DisableQuickEdit`。快速编辑下修改配置不会对已有的扫描数据重新计算。
-    pub fn set_quick_edit(&self, enabled: bool) -> Result<()> {
-        self.res("/system").set("/quickEditEnabled", enabled)
+    pub async fn set_quick_edit(&self, enabled: bool) -> Result<()> {
+        self.res("/system").set("/quickEditEnabled", enabled).await
     }
 
     /// 快速编辑是否开启：`read /system` 的 `quickEditEnabled`，对应 C++ 的 `QuickEditEnabled`。
-    pub fn quick_edit_enabled(&self) -> Result<bool> {
-        self.res("/system").get("/quickEditEnabled")
+    pub async fn quick_edit_enabled(&self) -> Result<bool> {
+        self.res("/system").get("/quickEditEnabled").await
     }
 
     /// GDP 端口：`read /controls/gocator` 的 `serverPort`，对应 C++ 的 `GdpPort`。不在 `u16` 内时报 `Payload`
     /// （C++ 截断为 `k16u`）。
-    pub fn gdp_port(&self) -> Result<u16> {
-        self.res("/controls/gocator").get("/serverPort")
+    pub async fn gdp_port(&self) -> Result<u16> {
+        self.res("/controls/gocator").get("/serverPort").await
     }
 
     /// 序列号为 `serial` 的传感器的资源路径，找不到时为 `None`，对应 C++ 的 `SensorPath`（找不到时返回 `""`）。
     ///
     /// 与 C++ 一样逐层读取 `/scan/engines`、各引擎的 `scanners`、各扫描器的 `sensors` 与每个传感器，比较字符串
     /// `serialNumber`；共 O(传感器数) 次往返。
-    pub fn sensor_path(&self, serial: &str) -> Result<Option<String>> {
-        for engine in self.res("/scan/engines").child_paths(rel::ITEM)? {
+    pub async fn sensor_path(&self, serial: &str) -> Result<Option<String>> {
+        for engine in self.res("/scan/engines").child_paths(rel::ITEM).await? {
             for scanner in self
                 .res(&format!("{engine}/scanners"))
-                .child_paths(rel::ITEM)?
+                .child_paths(rel::ITEM)
+                .await?
             {
                 for sensor in self
                     .res(&format!("{scanner}/sensors"))
-                    .child_paths(rel::ITEM)?
+                    .child_paths(rel::ITEM)
+                    .await?
                 {
-                    if self.res(&sensor).get::<&str>("/serialNumber")? == serial {
+                    if self.res(&sensor).get::<&str>("/serialNumber").await? == serial {
                         return Ok(Some(sensor));
                     }
                 }
@@ -127,10 +129,11 @@ impl System {
     }
 
     /// `call /system/commands/<name>`。
-    fn command(&self, name: &str) -> Result<()> {
+    async fn command(&self, name: &str) -> Result<()> {
         self.res("/system")
             .command(name, Value::object())
-            .response()?;
+            .response()
+            .await?;
         Ok(())
     }
 

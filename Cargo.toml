@@ -19,10 +19,14 @@ serde = "1.0.228"
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 socket2 = "0.6.5"
 thiserror = "2.0.18"
+# 连接层基于 tokio：每条连接一个读任务，超时与取消统一经 tokio::time；不保留阻塞 API。
+tokio = { version = "1.53.3", features = ["rt", "net", "time", "sync", "io-util", "macros"] }
 
 [dev-dependencies]
 # derive：文档与测试里类型化读取的示例结构体。
 serde = { version = "1.0.228", features = ["derive"] }
+# 示例的 #[tokio::main] 与 receive_async 读 stdin。
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std"] }
 
 [lints.rust]
 # 线上协议全部用安全 Rust 实现，unsafe 只出现在依赖中。

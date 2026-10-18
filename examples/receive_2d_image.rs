@@ -39,11 +39,12 @@ send_measurement(2, max_intensity)
 send_measurement(3, mean_intensity)
 ";
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     // 修改配置之前先停止。
-    system.stop()?;
+    system.stop().await?;
     let client = system.client();
 
     client
@@ -52,59 +53,69 @@ fn main() -> common::Result {
             r#"{"name":"job01","enabled":true}"#.parse::<Value>()?,
         )
         .timeout(common::EXTENDED_TIMEOUT)
-        .response()?;
+        .response()
+        .await?;
 
     let mut trigger = Value::object();
     trigger.set(common::TRIGGER_SOURCE_PATH, common::TRIGGER_MODE_TIME)?;
-    client.update(common::SENSOR_2D_PATH, trigger).response()?;
+    client
+        .update(common::SENSOR_2D_PATH, trigger)
+        .response()
+        .await?;
 
     let mut exposure = Value::object();
     exposure.set("/parameters/generalSettings/exposure", 60.0)?;
-    client.update(common::SENSOR_2D_PATH, exposure).response()?;
+    client
+        .update(common::SENSOR_2D_PATH, exposure)
+        .response()
+        .await?;
 
-    setup_script_tool(client)?;
+    setup_script_tool(client).await?;
 
-    common::enable_gdp(client)?;
-    let output = client.read(IMAGE_OUTPUT_PATH).response()?.payload;
+    common::enable_gdp(client).await?;
+    let output = client.read(IMAGE_OUTPUT_PATH).response().await?.payload;
     let source = output["dataSourceId"]
         .as_str()
         .ok_or("the image output has no \"dataSourceId\"")?;
     println!("{source}");
-    common::add_output(client, source, 0)?;
+    common::add_output(client, source, 0).await?;
 
-    let mut gdp = common::connect_gdp(&system)?;
-    common::start_if_ready(&system)?;
+    let mut gdp = common::connect_gdp(&system).await?;
+    common::start_if_ready(&system).await?;
 
-    let data_set = common::wait_for_image(&mut gdp)?;
+    let data_set = common::wait_for_image(&mut gdp).await?;
     common::print_image_set(&data_set, Some(common::IMAGE_FILE))?;
 
     drop(gdp);
-    system.stop()?;
+    system.stop().await?;
     Ok(())
 }
 
 /// 在位置 0 创建 Script 工具，设置 4 个输出及其类型并写入 [`SCRIPT`]。
-fn setup_script_tool(client: &Client) -> common::Result {
+async fn setup_script_tool(client: &Client) -> common::Result {
     client
         .create(
             "/tools/",
             r#"{"type":"Script","autoConnect":true,"position":0}"#.parse::<Value>()?,
         )
-        .response()?;
+        .response()
+        .await?;
     client
         .update(
             SCRIPT_TOOL_PATH,
             r#"{"parameters":{"NumberOfOutputs":4}}"#.parse::<Value>()?,
         )
-        .response()?;
+        .response()
+        .await?;
     // 输出类型：18 为图像，5 为测量值。
     let types =
         r#"{"parameters":{"Output0Type":18,"Output1Type":5,"Output2Type":5,"Output3Type":5}}"#;
     client
         .update(SCRIPT_TOOL_PATH, types.parse::<Value>()?)
-        .response()?;
+        .response()
+        .await?;
     let mut code = Value::object();
     code.set("/parameters/Code/code", SCRIPT)?;
-    client.update(SCRIPT_TOOL_PATH, code).response()?;
+    client.update(SCRIPT_TOOL_PATH, code).response().await?;
     Ok(())
 }

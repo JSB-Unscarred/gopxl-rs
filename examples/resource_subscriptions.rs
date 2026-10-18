@@ -12,7 +12,6 @@
 
 mod common;
 
-use std::thread;
 use std::time::Duration;
 
 use common::{ENGINE_ID, ENGINE_PATH, SENSOR_PATH};
@@ -21,48 +20,49 @@ use gopxl::resource::rel;
 /// 启停之后等待通知到达的时间（C++ 的 `kThread_Sleep(500'000)`）。
 const NOTIFY_WAIT: Duration = Duration::from_millis(500);
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
 
     println!("\n=== Manual Subscription ===");
     let mut system_res = system.resource("/system");
     println!("Subscribing to /system...");
-    system_res.subscribe()?;
+    system_res.subscribe().await?;
     println!("IsSubscribed: {}", system_res.is_subscribed());
 
-    let run_state = system_res.get::<i64>("/runState")?;
+    let run_state = system_res.get::<i64>("/runState").await?;
     println!("Initial runState: {run_state}");
     println!("HasRemoteChanges: {}", system_res.has_remote_changes());
 
     // 启停使服务端发出 /system 的 updated 通知。
     println!("\nStarting sensor to trigger notification...");
-    system.start()?;
-    thread::sleep(NOTIFY_WAIT);
+    system.start().await?;
+    tokio::time::sleep(NOTIFY_WAIT).await;
     println!(
         "HasRemoteChanges after start: {}",
         system_res.has_remote_changes()
     );
 
     // 缓存已过期，这次读服务端。
-    let run_state = system_res.get::<i64>("/runState")?;
+    let run_state = system_res.get::<i64>("/runState").await?;
     println!("Updated runState: {run_state}");
     println!(
         "HasRemoteChanges after re-read: {}",
         system_res.has_remote_changes()
     );
 
-    system.stop()?;
-    thread::sleep(NOTIFY_WAIT);
+    system.stop().await?;
+    tokio::time::sleep(NOTIFY_WAIT).await;
 
     println!("\nUnsubscribing...");
-    system_res.unsubscribe();
+    system_res.unsubscribe().await?;
     println!("IsSubscribed: {}", system_res.is_subscribed());
 
     println!("\n=== Subscribe on Creation ===");
     let mut sensor = system.resource(SENSOR_PATH);
-    sensor.subscribe()?;
-    sensor.data()?;
+    sensor.subscribe().await?;
+    sensor.data().await?;
     println!("Sensor resource created, subscribed and cached.");
     println!("IsSubscribed: {}", sensor.is_subscribed());
 
@@ -70,7 +70,7 @@ fn main() -> common::Result {
     let mut engines = system.resource("/scan/engines");
     // 展开层级 0：条目只有链接。
     engines.set_expand_level(0);
-    let engine_paths = engines.child_paths(rel::ITEM)?;
+    let engine_paths = engines.child_paths(rel::ITEM).await?;
     println!("Engines (expandLevel=0), {} found:", engine_paths.len());
     for path in &engine_paths {
         println!("  {path}");
@@ -78,7 +78,7 @@ fn main() -> common::Result {
 
     // 展开层级 1：条目带数据，直接放进子资源的缓存。改层级即丢弃缓存，children 按新层级重读。
     engines.set_expand_level(1);
-    let engine_children = engines.children(rel::ITEM)?;
+    let engine_children = engines.children(rel::ITEM).await?;
     println!(
         "\nEngines (expandLevel=1), {} found:",
         engine_children.len()
@@ -90,7 +90,7 @@ fn main() -> common::Result {
     println!("\n=== Scanner Enumeration ===");
     let mut laser_engine = system.resource(ENGINE_PATH);
     laser_engine.set_expand_level(1);
-    let scanner_paths = laser_engine.child_paths(rel::SCANNER)?;
+    let scanner_paths = laser_engine.child_paths(rel::SCANNER).await?;
     println!("Scanners under {ENGINE_ID}:");
     for path in &scanner_paths {
         println!("  {path}");
@@ -99,15 +99,15 @@ fn main() -> common::Result {
     println!("\n=== Caching Behavior ===");
     let mut sys_info = system.resource("/system/info");
     println!("First read (server round-trip)...");
-    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId").await?);
     println!("Second read (from cache)...");
-    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId").await?);
     println!("After InvalidateCache (server round-trip)...");
     sys_info.invalidate();
-    println!("  appId: {}", sys_info.get::<&str>("/appId")?);
+    println!("  appId: {}", sys_info.get::<&str>("/appId").await?);
 
     // 断开（C++ 的 `Disconnect`）之前取消订阅；未订阅时什么也不做。
-    sensor.unsubscribe();
+    sensor.unsubscribe().await?;
     drop(system);
     Ok(())
 }

@@ -11,24 +11,25 @@ mod common;
 
 use gopxl::gdp::{Body, Cas, Image};
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
-    if !common::replay_enabled(client)? {
-        common::set_scan_mode(client, common::SCAN_MODE_IMAGE, "Image")?;
-        common::start_if_ready(&system)?;
+    if !common::replay_enabled(client).await? {
+        common::set_scan_mode(client, common::SCAN_MODE_IMAGE, "Image").await?;
+        common::start_if_ready(&system).await?;
     }
 
-    common::enable_gdp(client)?;
+    common::enable_gdp(client).await?;
     // 传感器的图像数据源：传感器 ID 加数据源键（`LMILaserLineProfiler` 为 `Image`）与序号 0。
     let source = common::scan_source(&format!("{}Image0", common::SENSOR_ID));
-    common::ensure_output(client, &source)?;
+    common::ensure_output(client, &source).await?;
 
-    let mut gdp = common::connect_gdp(&system)?;
+    let mut gdp = common::connect_gdp(&system).await?;
 
-    let data_set = gdp.receive(common::RECEIVE_TIMEOUT)?;
+    let data_set = gdp.receive(common::RECEIVE_TIMEOUT).await?;
     println!(
         "Total number of messages in this data set: {}",
         data_set.len()
@@ -46,7 +47,7 @@ fn main() -> common::Result {
     }
 
     drop(gdp);
-    system.stop()?;
+    system.stop().await?;
     Ok(())
 }
 

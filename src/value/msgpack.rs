@@ -8,7 +8,7 @@
 //! - 嵌套深度上限 [`MAX_DEPTH`]，递归不会栈溢出（栈溢出直接终止进程）；
 //! - 数组的预分配不超过剩余字节数，声明 2³²−1 个元素的坏帧不会触发巨量分配；
 //! - 读取都经过 `bytes::Buf` 的 `try_get_*` 与带长度检查的 `take`，下面的 lint 禁止下标与 unwrap，
-//!   读线程不会因为坏帧 panic。
+//!   读任务不会因为坏帧 panic。
 
 #![deny(
     clippy::indexing_slicing,

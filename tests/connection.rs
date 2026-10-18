@@ -1,10 +1,10 @@
-//! 连接层的进程内测试：回环地址上的 `TcpListener` 扮演服务端，按脚本收发 carrier 帧与 GDP 消息。只钉住本 crate
-//! 自有、无法与官方 SDK 对照的线程与所有权约定（FIFO 墓碑、拆连接一次、Drop 不阻塞、订阅的本地引用计数、流的
-//! 早到消息、资源缓存失效、GDP 组集）；协议事实留给真机上的示例验证。
+//! 连接层的进程内测试：回环地址上的 `TcpListener` 扮演服务端，脚本在自己的线程里按 carrier 帧格式收发请求与响应，
+//! 客户端跑在 tokio 的测试运行时上。只钉住本 crate 自有、无法与官方 SDK 对照的任务与所有权约定（FIFO 墓碑、
+//! 拆连接一次、Drop 不阻塞、订阅的本地引用计数、流的早到消息、资源缓存失效、GDP 组集）；协议事实留给真机上的示例验证。
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use gopxl::gdp::{self, Body, RecvError};
 use gopxl::resource::Resource;
 use gopxl::value::msgpack;
 use gopxl::{DisconnectReason, Error, Value};
+use tokio::sync::mpsc;
 
 /// carrier 类型：MessagePack。
 const MSGPACK: u16 = 0xB000;
@@ -135,9 +136,9 @@ fn gdp_signal(is_last: bool) -> Vec<u8> {
 }
 
 // FIFO 对应与墓碑：超时的请求丢弃接收端后，它的槽位仍占住 FIFO 的位置吸收迟到的响应；下一个请求拿到自己的响应，
-// 连接照常可用（C++ SDK 此后全部错位）。Client Drop 即 shutdown，对端读到 EOF。
-#[test]
-fn late_response_is_absorbed_by_the_timed_out_slot() {
+// 连接照常可用（C++ SDK 此后全部错位）。Connection Drop 即 shutdown，对端读到 EOF。
+#[tokio::test]
+async fn late_response_is_absorbed_by_the_timed_out_slot() {
     let server = Server::start(|listener| {
         let mut conn = accept(listener);
         expect_request(&mut conn, "read", "/slow");
@@ -146,14 +147,15 @@ fn late_response_is_absorbed_by_the_timed_out_slot() {
         write_message(&mut conn, &response("fast"));
         wait_for_close(&mut conn);
     });
-    let connection = Connection::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let client = connection.client();
     let slow = client
         .read("/slow")
         .timeout(Duration::from_millis(50))
-        .response();
+        .response()
+        .await;
     assert!(matches!(slow, Err(Error::Timeout { .. })));
-    let fast = client.read("/fast").response().unwrap();
+    let fast = client.read("/fast").response().await.unwrap();
     assert_eq!(fast.payload, Value::from("fast"));
     assert!(client.is_connected());
     drop(connection);
@@ -161,9 +163,9 @@ fn late_response_is_absorbed_by_the_timed_out_slot() {
 }
 
 // 拆连接只执行一次：服务端关闭连接时，所有挂起的请求以同一个 Arc 原因（Eof）失败；之后 is_connected 为假，新请求与
-// 阻塞在 recv_timeout 上的订阅都立即报 Disconnected。
-#[test]
-fn server_close_fails_every_pending_request_with_one_reason() {
+// 等待中的订阅都立即报 Disconnected。
+#[tokio::test]
+async fn server_close_fails_every_pending_request_with_one_reason() {
     let server = Server::start(|listener| {
         let mut conn = accept(listener);
         expect_request(&mut conn, "sub", "/system");
@@ -172,15 +174,14 @@ fn server_close_fails_every_pending_request_with_one_reason() {
         expect_request(&mut conn, "read", "/b");
         // 两个请求都已入队，不回应，直接关闭。
     });
-    let connection = Connection::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let client = connection.client();
-    let subscription = client.subscribe("/system").unwrap();
-    let a = client.read("/a");
-    let b = client.read("/b");
-    let Err(Error::Disconnected(reason_a)) = a.response() else {
+    let subscription = client.subscribe("/system").await.unwrap();
+    let (a, b) = tokio::join!(client.read("/a").response(), client.read("/b").response());
+    let Err(Error::Disconnected(reason_a)) = a else {
         panic!("expected Disconnected")
     };
-    let Err(Error::Disconnected(reason_b)) = b.response() else {
+    let Err(Error::Disconnected(reason_b)) = b else {
         panic!("expected Disconnected")
     };
     assert!(matches!(*reason_a, DisconnectReason::Eof));
@@ -189,59 +190,62 @@ fn server_close_fails_every_pending_request_with_one_reason() {
 
     let start = Instant::now();
     assert!(matches!(
-        client.read("/c").response(),
+        client.read("/c").response().await,
         Err(Error::Disconnected(_))
     ));
     assert!(matches!(
-        subscription.recv_timeout(Duration::MAX),
+        subscription.recv_timeout(Duration::MAX).await,
         Err(Error::Disconnected(_))
     ));
     assert!(start.elapsed() < Duration::from_secs(1));
     server.finish();
 }
 
-// Drop 从不阻塞：读线程卡在半帧里时，Client 的 Drop 只 shutdown、不 join，立即返回（C++ 先 join 后关闭 socket，
-// 此时永远挂住）。挂起的请求以 Closed 失败；Client 不让连接存活，之后经它发出的请求立即失败。
-#[test]
-fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
-    let (half_sent, half_received) = mpsc::channel();
-    let (dropped, dropped_received) = mpsc::channel::<()>();
+// Drop 从不阻塞：读任务卡在半帧里时，Connection 的 Drop 记下原因、shutdown 并中止读任务，立即返回（C++ 先 join
+// 后关闭 socket，此时永远挂住）。挂起的请求以 Closed 失败；Client 不让连接存活，之后经它发出的请求立即失败。
+#[tokio::test]
+async fn drop_returns_while_the_reader_is_stuck_in_a_half_frame() {
+    let (half_sent, mut half_received) = mpsc::channel(1);
+    let (dropped, mut dropped_received) = mpsc::channel::<()>(1);
     let server = Server::start(move |listener| {
         let mut conn = accept(listener);
         // 只写出长度字段：声明一帧 100 字节，剩下的永远不来。
         conn.write_all(&100_u32.to_le_bytes()).unwrap();
         expect_request(&mut conn, "read", "/x");
-        half_sent.send(()).unwrap();
-        // 测试线程确认 Drop 已返回后才关闭；超过 STEP 也关闭，让一个会 join 的 Drop 结束、由测试里的计时报错。
-        let _ = dropped_received.recv_timeout(STEP);
+        half_sent.blocking_send(()).unwrap();
+        // 测试确认 Drop 已返回后才关闭；超过 STEP 也关闭，让一个会等读任务的 Drop 结束、由测试里的计时报错。
+        let _ = dropped_received.blocking_recv();
         wait_for_close(&mut conn);
     });
-    let connection = Connection::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let client = connection.client().clone();
-    let pending = client.read("/x");
-    half_received.recv().unwrap();
+    let pending = tokio::spawn({
+        let client = client.clone();
+        async move { client.read("/x").response().await }
+    });
+    half_received.recv().await.unwrap();
 
     let start = Instant::now();
     drop(connection);
     assert!(start.elapsed() < Duration::from_secs(1));
-    dropped.send(()).unwrap();
+    dropped.send(()).await.unwrap();
 
-    let Err(Error::Disconnected(reason)) = pending.response() else {
+    let Err(Error::Disconnected(reason)) = pending.await.unwrap() else {
         panic!("expected Disconnected")
     };
     assert!(matches!(*reason, DisconnectReason::Closed));
     assert!(!client.is_connected());
     assert!(matches!(
-        client.read("/y").response(),
+        client.read("/y").response().await,
         Err(Error::Disconnected(_))
     ));
     server.finish();
 }
 
-// 订阅：同一表达式的本地订阅各自收到通知，按表达式投递（不匹配的路径收不到）；Drop 时只有该表达式最后一个本地订阅
+// 订阅：同一表达式的本地订阅各自收到通知，按表达式投递（不匹配的路径收不到）；注销时只有该表达式最后一个本地订阅
 // 写出 unSub，不等应答。
-#[test]
-fn last_local_subscription_sends_unsub() {
+#[tokio::test]
+async fn last_local_subscription_sends_unsub() {
     let server = Server::start(|listener| {
         let mut conn = accept(listener);
         for _ in 0..2 {
@@ -256,27 +260,27 @@ fn last_local_subscription_sends_unsub() {
         expect_request(&mut conn, "unSub", "/system");
         wait_for_close(&mut conn);
     });
-    let connection = Connection::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let client = connection.client();
-    let first = client.subscribe("/system").unwrap();
-    let second = client.subscribe("/system").unwrap();
+    let first = client.subscribe("/system").await.unwrap();
+    let second = client.subscribe("/system").await.unwrap();
     for subscription in [&first, &second] {
-        let notice = subscription.recv_timeout(STEP).unwrap().unwrap();
+        let notice = subscription.recv_timeout(STEP).await.unwrap().unwrap();
         assert!(matches!(notice, Notice::Event(n) if n.path == "/system"));
     }
     drop(first);
-    client.read("/probe").response().unwrap();
+    client.read("/probe").response().await.unwrap();
     // 两条通知都排在探针的应答之前，/tools/1 的那条没有投给 /system 的订阅。
-    assert!(second.recv_timeout(Duration::ZERO).unwrap().is_none());
-    drop(second);
+    assert!(second.try_recv().unwrap().is_none());
+    second.unsubscribe().await.unwrap();
     drop(connection);
     server.finish();
 }
 
 // 流：每个流一条自有连接，只写出 stream 请求；应答之前到达的流消息先缓存，应答之后按原顺序交给消费者；应答之后的
 // 孤立响应忽略；结束消息照常取出。
-#[test]
-fn stream_delivers_early_data_after_the_reply_in_order() {
+#[tokio::test]
+async fn stream_delivers_early_data_after_the_reply_in_order() {
     let server = Server::start(|listener| {
         let _main = accept(listener);
         let mut conn = accept(listener);
@@ -289,24 +293,24 @@ fn stream_delivers_early_data_after_the_reply_in_order() {
         write_message(&mut conn, &stream_message("complete", Value::Nil));
         wait_for_close(&mut conn);
     });
-    let connection = Connection::connect(server.addr).unwrap();
-    let client = connection.client();
-    let stream = client
+    let connection = Connection::connect(server.addr).await.unwrap();
+    let mut stream = connection
+        .client()
         .open_stream("/system/metrics", json(r#"{"period":1000}"#))
+        .await
         .unwrap();
-    let next = || stream.recv_timeout(STEP).unwrap().unwrap();
-    assert_eq!(next().payload, Value::from(1));
-    assert_eq!(next().payload, Value::from(2));
-    assert_eq!(next().state, StreamState::Complete);
+    assert_eq!(stream.recv().await.unwrap().payload, Value::from(1));
+    assert_eq!(stream.recv().await.unwrap().payload, Value::from(2));
+    assert_eq!(stream.recv().await.unwrap().state, StreamState::Complete);
     drop(stream);
     drop(connection);
     server.finish();
 }
 
 // 资源缓存按连接的写计数失效：命中缓存时不发请求；同一连接上的变更请求、订阅本身、订阅收到的通知都使下一次读取
-// 重新向服务端请求；Resource Drop 时订阅随之退订。
-#[test]
-fn resource_cache_expires_on_writes_and_notices() {
+// 重新向服务端请求；unsubscribe 写出 unSub。
+#[tokio::test]
+async fn resource_cache_expires_on_writes_and_notices() {
     let server = Server::start(|listener| {
         let mut conn = accept(listener);
         let read = expect_request(&mut conn, "read", "/x");
@@ -328,27 +332,32 @@ fn resource_cache_expires_on_writes_and_notices() {
         expect_request(&mut conn, "unSub", "/x/*");
         wait_for_close(&mut conn);
     });
-    let connection = Connection::connect(server.addr).unwrap();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let client = connection.client();
     let mut resource = Resource::new(client.clone(), "/x");
-    assert_eq!(resource.get::<i64>("/v").unwrap(), 1);
-    assert_eq!(resource.get::<i64>("/v").unwrap(), 1);
+    assert_eq!(resource.get::<i64>("/v").await.unwrap(), 1);
+    assert_eq!(resource.get::<i64>("/v").await.unwrap(), 1);
     assert!(!resource.has_remote_changes());
-    client.update("/y", Value::object()).response().unwrap();
+    client
+        .update("/y", Value::object())
+        .response()
+        .await
+        .unwrap();
     assert!(resource.has_remote_changes());
-    assert_eq!(resource.get::<i64>("/v").unwrap(), 2);
-    resource.subscribe().unwrap();
-    assert_eq!(resource.get::<i64>("/v").unwrap(), 3);
+    assert_eq!(resource.get::<i64>("/v").await.unwrap(), 2);
+    resource.subscribe().await.unwrap();
+    assert_eq!(resource.get::<i64>("/v").await.unwrap(), 3);
     assert!(resource.has_remote_changes());
-    assert_eq!(resource.get::<i64>("/v").unwrap(), 4);
+    assert_eq!(resource.get::<i64>("/v").await.unwrap(), 4);
+    resource.unsubscribe().await.unwrap();
     drop(resource);
     drop(connection);
     server.finish();
 }
 
 // 文件传输：在临时连接上完成一个往返，读到应答即关闭该连接；主连接不参与。
-#[test]
-fn transfer_round_trips_on_its_own_connection() {
+#[tokio::test]
+async fn transfer_round_trips_on_its_own_connection() {
     let server = Server::start(|listener| {
         let mut main = accept(listener);
         let mut conn = accept(listener);
@@ -360,12 +369,11 @@ fn transfer_round_trips_on_its_own_connection() {
         wait_for_close(&mut conn);
         wait_for_close(&mut main);
     });
-    let connection = Connection::connect(server.addr).unwrap();
-    let client = connection.client();
+    let connection = Connection::connect(server.addr).await.unwrap();
     let mut payload = Value::object();
     payload.set("/data", vec![1_u8, 2, 3]).unwrap();
     let request = Request::with_payload(Method::Call, "/system/commands/archive", payload);
-    let response = client.transfer(request, STEP).unwrap();
+    let response = connection.client().transfer(request, STEP).await.unwrap();
     assert_eq!(response.payload["data"], Value::from(vec![4_u8, 5]));
     drop(connection);
     server.finish();
@@ -373,30 +381,33 @@ fn transfer_round_trips_on_its_own_connection() {
 
 // GDP：receive 以 is_last_msg 结束一个数据集；期限内未结束时报 Incomplete 并保留已收到的消息，下一次接着组装；
 // 服务端关闭后（取完已到的消息）报 Disconnected。
-#[test]
-fn gdp_receive_assembles_a_data_set_across_calls() {
-    let (sent, received) = mpsc::channel();
-    let (go_on, wait) = mpsc::channel::<()>();
+#[tokio::test]
+async fn gdp_receive_assembles_a_data_set_across_calls() {
+    let (sent, mut received) = mpsc::channel(1);
+    let (go_on, mut wait) = mpsc::channel::<()>(1);
     let server = Server::start(move |listener| {
         let mut conn = accept(listener);
         conn.write_all(&gdp_signal(false)).unwrap();
         conn.write_all(&gdp_signal(false)).unwrap();
-        sent.send(()).unwrap();
-        wait.recv().unwrap();
+        sent.blocking_send(()).unwrap();
+        wait.blocking_recv().unwrap();
         conn.write_all(&gdp_signal(true)).unwrap();
         // 数据集写完即关闭。
     });
-    let mut gdp = gdp::Client::connect(server.addr).unwrap();
-    received.recv().unwrap();
+    let mut gdp = gdp::Client::connect(server.addr).await.unwrap();
+    received.recv().await.unwrap();
     assert!(matches!(
-        gdp.receive(Duration::from_secs(1)),
+        gdp.receive(Duration::from_secs(1)).await,
         Err(RecvError::Incomplete { messages: 2 })
     ));
-    go_on.send(()).unwrap();
-    let data_set = gdp.receive(STEP).unwrap();
+    go_on.send(()).await.unwrap();
+    let data_set = gdp.receive(STEP).await.unwrap();
     assert_eq!(data_set.len(), 3);
     assert!(data_set.iter().all(|m| matches!(m.body, Body::Signal)));
     assert!(data_set[2].cas.is_last_msg);
-    assert!(matches!(gdp.receive(STEP), Err(RecvError::Disconnected(_))));
+    assert!(matches!(
+        gdp.receive(STEP).await,
+        Err(RecvError::Disconnected(_))
+    ));
     server.finish();
 }

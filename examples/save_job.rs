@@ -24,30 +24,31 @@ const JOB_FILE: &str = "sample_job.gpjob";
 /// 上传作业的读超时，即 C++ 的 `REST_COMMAND_TIMEOUT_MSEC`。
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3);
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
     // 与 C++ 相同，列表失败只报告、不中止。
-    if let Err(e) = list_jobs(client) {
+    if let Err(e) = list_jobs(client).await {
         eprintln!("Error: {e}");
     }
 
     let save = r#"{"name":"SDK-demo"}"#.parse::<Value>()?;
     println!("Saving current job as {}...", save["name"]);
-    client.call(SAVE_JOB_PATH, save).response()?;
+    client.call(SAVE_JOB_PATH, save).response().await?;
 
     let rename = r#"{"sourceName":"SDK-demo","destName":"SDK-demo-job"}"#.parse::<Value>()?;
     println!("Renaming job to {}...", rename["destName"]);
     // 与 C++ 相同，改名失败（例如目标已存在）不中止，继续下载已有的同名作业。
-    if let Err(e) = client.call(RENAME_JOB_PATH, rename).response() {
+    if let Err(e) = client.call(RENAME_JOB_PATH, rename).response().await {
         eprintln!("Error: {e}");
     }
 
     let job_file = std::path::absolute(JOB_FILE)?;
     let download = Request::new(Method::Read, READ_DATA_PATH);
-    let job = client.transfer(download, common::RECEIVE_TIMEOUT)?;
+    let job = client.transfer(download, common::RECEIVE_TIMEOUT).await?;
     let content = job.payload["content"]
         .as_bytes()
         .ok_or("job data has no binary \"content\"")?;
@@ -65,18 +66,18 @@ fn main() -> common::Result {
         job_file.display()
     );
     let create = Request::with_payload(Method::Create, JOB_FILES_PATH, upload);
-    client.transfer(create, UPLOAD_TIMEOUT)?;
+    client.transfer(create, UPLOAD_TIMEOUT).await?;
 
     let load = r#"{"name":"SDK-local-job-demo"}"#.parse::<Value>()?;
-    client.call(LOAD_JOB_PATH, load).response()?;
-    let jobs = read_expanded(client, JOBS_PATH)?;
+    client.call(LOAD_JOB_PATH, load).response().await?;
+    let jobs = read_expanded(client, JOBS_PATH).await?;
     println!("Loaded job: {}", common::text(&jobs["loadedJob"]));
     Ok(())
 }
 
 /// 打印设备上已保存的作业名。
-fn list_jobs(client: &Client) -> common::Result {
-    let files = read_expanded(client, JOB_FILES_PATH)?;
+async fn list_jobs(client: &Client) -> common::Result {
+    let files = read_expanded(client, JOB_FILES_PATH).await?;
     if let Some(jobs) = files.pointer("/_embedded/item") {
         println!("List of saved jobs:");
         for job in jobs.as_array().unwrap_or_default() {
@@ -89,8 +90,8 @@ fn list_jobs(client: &Client) -> common::Result {
 }
 
 /// `read path`，参数 `expandLevel: 1` 把内嵌资源展开一层（作业在列表中只部分表示；省略等同于 0）。
-fn read_expanded(client: &Client, path: &str) -> common::Result<Value> {
+async fn read_expanded(client: &Client, path: &str) -> common::Result<Value> {
     let mut request = Request::new(Method::Read, path);
     request.args.set("expandLevel", 1)?;
-    Ok(client.send(request).response()?.payload)
+    Ok(client.send(request).response().await?.payload)
 }

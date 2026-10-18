@@ -16,6 +16,7 @@ LMI GoPxL（Gocator 3D 传感器平台）客户端 SDK 的 Rust 实现（非官�
 ## 环境
 
 - Rust 1.87 或更新版本；不依赖 C 库，构建不需要安装 GoPxL SDK。
+- 连接层基于 tokio，I/O 都是 `async fn`，由调用方提供运行时（示例用 `#[tokio::main]`）。
 - 目标平台与 C++ SDK 相同：`x86_64-pc-windows-msvc`、`x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、
   `armv7-unknown-linux-gnueabihf`；目前只在 `x86_64-pc-windows-msvc` 上构建验证。
 
@@ -43,7 +44,7 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 ## 已实现的接口
 
 以官方 C++ SDK（8.5.62.52）的公共头文件为准；.NET 的同名接口归入同一行，行为差异写在说明列，.NET 独有的接口单独
-成行。
+成行。连接层与门面的方法都是 `async fn`，表中的签名省略 `async` 与 `.await`。
 
 | SDK 接口 | Rust 接口 | 说明 |
 | --- | --- | --- |
@@ -74,15 +75,15 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `kStatus_Name` | `control::Status::name`、`is_ok`；`impl Display for Status` | 返回手册中的名字（`"notFound"`） |
 | `GoUri::UrlEncode`、`UrlDecode` | `control::url_encode(&str) -> String`、`control::url_decode(&str) -> Vec<u8>` | 不提供 `spaceAsPlus`；解码不越界读取，结果可能不是 UTF-8，所以返回字节 |
 | `GoRestClient::Connect` | `control::Connection::connect(SocketAddr) -> Result<Connection>` | 超时 1 s（.NET 为 1000 s）；设置 `TCP_NODELAY`、keepalive（空闲 30 s 后每 10 s 探测）与 10 s 写超时；端口 0 报 `InvalidArgument`（C++ 直接交给 socket） |
-| `GoRestClient::Disconnect` | `drop(client)` | 挂起的请求以 `Disconnected(Closed)` 失败；只 shutdown、不 join 读线程，从不阻塞（C++ 先 join 后 shutdown，可能挂住） |
-| `GoRestClient::IsConnected` | `control::Client::is_connected() -> bool` | 拆连接后为 `false`（C++ 连接丢失后仍为真）；`Connection::client()` 取得句柄，clone 可移到别的线程，不让连接存活 |
+| `GoRestClient::Disconnect` | `drop(client)` | 挂起的请求以 `Disconnected(Closed)` 失败；shutdown 并中止读任务，从不阻塞（C++ 先 join 后 shutdown，可能挂住） |
+| `GoRestClient::IsConnected` | `control::Client::is_connected() -> bool` | 拆连接后为 `false`（C++ 连接丢失后仍为真）；`Connection::client()` 取得句柄，clone 可移到别的任务，不让连接存活 |
 | `GoRestClient::Read`、`Update`、`Create`、`Delete`、`Call` | `Client::read(&str)`、`update(&str, impl Into<Value>)`、`create(&str, impl Into<Value>)`、`delete(&str)`、`call(&str, impl Into<Value>)`，均返回 `Transaction` | 第二个参数即 C++ 的 `content`（线上的 `payload`）；`args` 经 `Client::send` 设置；在写锁内先登记再写出（C++ 先入队后发送，发送失败留下孤儿事务）；写出失败或超时即拆连接 |
 | — | `Client::send(Request) -> Transaction` | 任意方法与 `args`，`listSub`、`clearSub`、`listStream` 也经它发送（两个 SDK 都没有）；`stream`、`cancelStream` 报 `InvalidArgument`，流见 `open_stream` |
-| `GoTransaction::GetResponse`、`CheckResponse` | `Transaction::timeout(Duration) -> Transaction`、`response() -> Result<Response>` | 默认 3 s，从 `response()` 开始计；`status` 不是 OK 时为 `Error::Request`；超时为 `Error::Timeout`，槽位成为墓碑，连接照常可用；丢弃 `Transaction` 即 fire-and-forget |
+| `GoTransaction::GetResponse`、`CheckResponse` | `Transaction::timeout(Duration) -> Transaction`、`response() -> Result<Response>` | `response()` 才写出请求，默认 3 s 只覆盖等待应答；`status` 不是 OK 时为 `Error::Request`；超时为 `Error::Timeout`，槽位成为墓碑，连接照常可用；丢弃 `Transaction` 则什么也不发 |
 | `GoTransaction::GetRequest`、`GetResponseFuture` | 不提供 | 请求在调用方手里；方法与路径出现在错误里 |
-| `GoRestClient::Sub`、`UnSub`、`SetSubHandler` | `Client::subscribe(&str) -> Result<Subscription>`；`Subscription::recv_timeout(Duration) -> Result<Option<Notice>>`、`recv() -> Result<Notice>`、`try_recv() -> Result<Option<Notice>>`；drop 即退订 | 拉取式：每个订阅一个队列（1024 条，满了丢最老的并产出 `Notice::Lagged`，读线程从不阻塞）；只收到服务端按该表达式会投递的通知（C++ 的全局处理器收到全部通知）；同一表达式的订阅共享服务端订阅，最后一个 drop 时写出 `unSub`，不等应答；`sub` 失败或超时时同样注销（超时后才执行的 `sub` 由随后的 `unSub` 撤销） |
-| `GoRestClient::AddNotificationListener`、`RemoveNotificationListener`、`ReplaceListenerCallback`、`ClearAllListeners` | 不提供 | 回调式订阅即在自己的线程里对 `Subscription` 循环 `recv_timeout`，drop 即移除（C++ 每条通知起一个线程、乱序；回调在锁内执行，重入即死锁） |
-| `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Client::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(Duration) -> Result<Option<StreamMessage>>`、`recv()`、`try_recv()`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
+| `GoRestClient::Sub`、`UnSub`、`SetSubHandler` | `Client::subscribe(&str) -> Result<Subscription>`；`Subscription::recv_timeout(Duration) -> Result<Option<Notice>>`、`recv() -> Result<Notice>`、`try_recv() -> Result<Option<Notice>>`；`unsubscribe()` 等 `unSub` 写出，drop 则交给一个 task | 拉取式：每个订阅一个队列（1024 条，满了丢最老的并产出 `Notice::Lagged`，读任务从不等待）；只收到服务端按该表达式会投递的通知（C++ 的全局处理器收到全部通知）；同一表达式的订阅共享服务端订阅，最后一个 drop 时写出 `unSub`，不等应答；`sub` 失败或超时时同样注销（超时后才执行的 `sub` 由随后的 `unSub` 撤销） |
+| `GoRestClient::AddNotificationListener`、`RemoveNotificationListener`、`ReplaceListenerCallback`、`ClearAllListeners` | 不提供 | 回调式订阅即在自己的任务里对 `Subscription` 循环 `recv`，drop 即移除（C++ 每条通知起一个线程、乱序；回调在锁内执行，重入即死锁） |
+| `GoRestClient::StartStream`、`StopStream`、`SetStreamHandler` | `Client::open_stream(&str, impl Into<Value>) -> Result<StreamHandle>`；`StreamHandle::recv_timeout(&mut self, Duration) -> Result<Option<StreamMessage>>`、`recv()`、`try_recv()`；drop 即停止 | 每个流一条连接，等待应答 5 s，`status` 不是 OK 时为 `Error::Request`；应答前到达的数据排在最前；结束消息（`Complete` / `Abort`）照常取出；应答之后的孤立响应忽略（C++ 当作下一个请求的应答）；关闭连接即停止，从不发 `cancelStream`；本地缓冲 4 条，消费者跟不上时背压到服务端 |
 | `GoRestClient::SetDisconnectHandler`、`SetReadErrorHandler` | 不提供 | 拆连接后 `is_connected` 为假，之后每个请求、订阅与流都返回 `Disconnected(原因)`；只在真正拆连接时（C++ 不给原因，一个坏消息就触发） |
 | — | `Client::transfer(Request, Duration) -> Result<Response>` | 文件传输（归档、恢复、升级、作业与回放数据）用的临时连接，不阻塞主连接；超时是连续没有收到字节的时长；下载的 `Bin` 引用响应帧 |
 | `GoSystem::GoSystem(address, port)`、`SetAddress`、`SetControlPort`、`Connect` | `System::connect(SocketAddr) -> Result<System>` | 存在即已连接，没有“未连接”的状态；端口 0 报 `InvalidArgument` |
@@ -97,8 +98,8 @@ GOPXL_IP=192.168.1.10 cargo run --example receive_measurement
 | `GoSystem::SensorPath` | `System::sensor_path(&str) -> Result<Option<String>>` | 与 C++ 一样逐层读取引擎、扫描器、传感器并比较字符串 `serialNumber`；找不到时为 `None`（C++ 返回 `""`） |
 | `ApiVersion`、`ReleaseVersion` | `API_VERSION`（`"9.0.0"`）、`RELEASE_VERSION`（`"1.5"`） |  |
 | `BuildVersion`、`BuildVersionNumber`、`GO_PXL_SDK_*` 版本数字常量（.NET 的 `Sdk*Constants`） | 不提供 | crate 版本由 Cargo 给出 |
-| `GoGdpClient::Connect`、`Close`（.NET 的 `Dispose`） | `gdp::Client::connect(SocketAddr) -> Result<gdp::Client>`；drop | 超时 5 s；读线程逐条解码；从不写 socket |
-| `GoGdpClient::ReceiveDataSync`、`DataSet`、`ReceiveDataAsync` | `gdp::Client::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | 按 `cas.is_last_msg` 组集；单一截止时间（C++ 读到一半时不限时）；区分 `Timeout` 与 `Incomplete`，已收到的消息保留到下一次；异步接收即在自己的线程里循环；本地只缓冲 4 条，不读时背压到服务端（C++ 的异步队列无界）；信封或 CAS 坏掉的消息丢弃 |
+| `GoGdpClient::Connect`、`Close`（.NET 的 `Dispose`） | `gdp::Client::connect(SocketAddr) -> Result<gdp::Client>`；drop | 超时 5 s；读任务逐条解码；从不写 socket |
+| `GoGdpClient::ReceiveDataSync`、`DataSet`、`ReceiveDataAsync` | `gdp::Client::receive(&mut self, Duration) -> Result<Vec<Message>, RecvError>` | 按 `cas.is_last_msg` 组集；单一截止时间（C++ 读到一半时不限时）；区分 `Timeout` 与 `Incomplete`，已收到的消息保留到下一次；异步接收即在自己的任务里循环；本地只缓冲 4 条，不读时背压到服务端（C++ 的异步队列无界）；信封或 CAS 坏掉的消息丢弃 |
 | `GoGdpClient::ClearData` | `gdp::Client::clear_data(&mut self) -> Result<()>` | 重连，丢弃积压的数据与未完成的数据集 |
 | `GoGdpClient::IsConnected`、`IpAddress`、`Port`；`GoDataSet::Sender`、`SetSender` | 不提供 | 断开后 `receive` 返回 `RecvError::Disconnected`；地址由调用方给出；数据集由调用 `receive` 的 `gdp::Client` 返回，来源已知 |
 | `GoDataSet::GdpMsgAt`、`Count`、`Clear`、`Add` | `Vec<gdp::Message>` 的下标、长度与方法 |  |

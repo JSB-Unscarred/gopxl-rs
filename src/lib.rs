@@ -6,7 +6,7 @@
 //!
 //! 入口：[`System`]（一台设备，拥有控制连接；[`System::resource`] 取得带缓存的资源，[`System::gdp`] 连接数据通道）、
 //! [`gdp::Client`]（测量数据）、[`discovery::discover`]（发现）。
-//! `examples/` 是官方 C++ 示例的移植。设计约定（分层、所有权、线程、unsafe、错误）见 [`docs::architecture`]。
+//! `examples/` 是官方 C++ 示例的移植。连接层基于 tokio，I/O 都是 `async fn`。分层、数据流、所有权、任务与锁、超时与错误见 [`docs::architecture`]，未经真机验证的协议假设见 [`docs::assumptions`]。
 
 pub mod control;
 pub mod discovery;

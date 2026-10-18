@@ -5,21 +5,24 @@
 
 mod common;
 
-use std::thread;
 use std::time::Duration;
 
 use common::{ALIGNED, ALIGNING, SCANNER_PATH, SENSOR_PATH, UNALIGNED};
 use gopxl::Value;
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
     let alignment_path = format!("{SCANNER_PATH}/alignment");
 
     let payload = r#"{"name":"SDK_alignment_sample"}"#.parse::<Value>()?;
     println!("Saving job as {}...", payload["name"]);
-    client.call("/jobs/commands/save", payload).response()?;
+    client
+        .call("/jobs/commands/save", payload)
+        .response()
+        .await?;
 
     println!("Clearing alignment...");
     client
@@ -27,18 +30,21 @@ fn main() -> common::Result {
             &format!("{SCANNER_PATH}/commands/clearAlign"),
             Value::object(),
         )
-        .response()?;
+        .response()
+        .await?;
 
     println!("Executing alignment...");
     client
         .call(&format!("{SCANNER_PATH}/commands/align"), Value::object())
         .timeout(common::EXTENDED_TIMEOUT)
-        .response()?;
+        .response()
+        .await?;
 
     // align 的应答可能在对准完成之前返回（协议手册），所以每秒读一次 alignState，直到不再是“对准中”。
     let state = loop {
-        thread::sleep(Duration::from_secs(1));
-        let state = common::read_at(client, &alignment_path, "/alignState")?
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let state = common::read_at(client, &alignment_path, "/alignState")
+            .await?
             .as_i64()
             .ok_or("alignState is not an integer")?;
         if state != ALIGNING {
@@ -58,7 +64,8 @@ fn main() -> common::Result {
     // 传感器的对准变换。
     let calibration = client
         .read(&format!("{SENSOR_PATH}/transform"))
-        .response()?
+        .response()
+        .await?
         .payload;
     println!("Alignment transform: {{");
     println!("X angle:  {},", calibration["xAngle"]);
@@ -72,7 +79,8 @@ fn main() -> common::Result {
     // 扫描器的变换：编码器分辨率与速度。
     let transform = client
         .read(&format!("{SCANNER_PATH}/transform"))
-        .response()?
+        .response()
+        .await?
         .payload;
     println!("Encoder resolution: {}", transform["encoderResolution"]);
     println!("Speed: {}", transform["speed"]);

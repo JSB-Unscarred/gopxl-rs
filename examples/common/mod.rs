@@ -97,23 +97,24 @@ pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 连接 `GOPXL_IP`，对应 C++ 示例开头的 `SetAddress`、`SetControlPort` 与 `Connect`；未设置时用
 /// [`discover_one`] 找到的实例。
-pub fn connect() -> Result<System> {
+pub async fn connect() -> Result<System> {
     let addr = match std::env::var("GOPXL_IP") {
         Ok(text) => match text.parse() {
             Ok(addr) => addr,
             Err(_) => SocketAddr::new(text.parse()?, control::DEFAULT_PORT),
         },
-        Err(_) => discover_one()?,
+        Err(_) => discover_one().await?,
     };
     println!("Connecting to {addr}...");
-    Ok(System::connect(addr)?)
+    Ok(System::connect(addr).await?)
 }
 
 /// 发现唯一一台可连接（未被远程控制）的 GoPxL 实例，返回它的控制通道地址。没有或有多台时返回错误，由
 /// `GOPXL_IP` 指定，避免连到别的设备上改配置。
-fn discover_one() -> Result<SocketAddr> {
+async fn discover_one() -> Result<SocketAddr> {
     println!("GOPXL_IP is not set, discovering...");
-    let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT)?
+    let found: Vec<_> = discovery::discover(DISCOVER_TIMEOUT)
+        .await?
         .iter()
         .filter_map(Instance::control_addr)
         .collect();
@@ -126,12 +127,12 @@ fn discover_one() -> Result<SocketAddr> {
 
 /// 打印 API 版本与设备信息，确认设备没有被远程控制；对应 C++ 的 `VerifyConnection`。被远程控制时返回错误：
 /// 这时要连接控制方的地址。
-pub fn verify_connection(system: &System) -> Result {
+pub async fn verify_connection(system: &System) -> Result {
     let client = system.client();
-    let version = client.read("/version").response()?.payload;
+    let version = client.read("/version").response().await?.payload;
     println!("API version is {}.", text(&version["apiVersion"]));
 
-    let info = client.read("/environ/info").response()?.payload;
+    let info = client.read("/environ/info").response().await?.payload;
     let (model, serial) = (text(&info["model"]), text(&info["serialNumber"]));
     let application = info["applicationType"].as_i64();
     let device = match application {
@@ -144,14 +145,18 @@ pub fn verify_connection(system: &System) -> Result {
     println!("This device is {device}.");
     // 传感器本身之外的应用，序列号属于它连接的传感器。
     if application != Some(0) {
-        let sensor = client.read(SENSOR_PATH).response()?.payload;
+        let sensor = client.read(SENSOR_PATH).response().await?.payload;
         println!(
             "The serial number of {SCANNER_ID} {SENSOR_ID} is {}.",
             text(&sensor["serialNumber"])
         );
     }
 
-    let remote = client.read("/environ/remoteController").response()?.payload;
+    let remote = client
+        .read("/environ/remoteController")
+        .response()
+        .await?
+        .payload;
     if remote["remoteConnected"].as_bool() == Some(true) {
         return Err(format!(
             "this device is controlled by a remote controller at IP {} with control port {}; \
@@ -198,8 +203,8 @@ pub fn scan_source(key: &str) -> String {
 }
 
 /// 读 `path`，取载荷中 `pointer` 处的值；缺失时报错（C++ 的 `At` 抛异常）。
-pub fn read_at(client: &Client, path: &str, pointer: &str) -> Result<Value> {
-    let payload = client.read(path).response()?.payload;
+pub async fn read_at(client: &Client, path: &str, pointer: &str) -> Result<Value> {
+    let payload = client.read(path).response().await?.payload;
     let value = payload
         .pointer(pointer)
         .ok_or_else(|| format!("{path} has no {pointer}"))?;
@@ -207,8 +212,9 @@ pub fn read_at(client: &Client, path: &str, pointer: &str) -> Result<Value> {
 }
 
 /// 读 `/replay/playback`，打印并返回用的是否是回放数据。
-pub fn replay_enabled(client: &Client) -> Result<bool> {
-    let enabled = read_at(client, "/replay/playback", "/enabled")?
+pub async fn replay_enabled(client: &Client) -> Result<bool> {
+    let enabled = read_at(client, "/replay/playback", "/enabled")
+        .await?
         .as_bool()
         .ok_or("/replay/playback enabled is not a boolean")?;
     println!("Using {} data", if enabled { "replay" } else { "live" });
@@ -216,86 +222,94 @@ pub fn replay_enabled(client: &Client) -> Result<bool> {
 }
 
 /// 扫描模式不是 `mode` 时改为 `mode`（`name` 用于打印）。
-pub fn set_scan_mode(client: &Client, mode: i64, name: &str) -> Result {
-    let current = read_at(client, SCANNER_PATH, SCAN_MODE_PATH)?
+pub async fn set_scan_mode(client: &Client, mode: i64, name: &str) -> Result {
+    let current = read_at(client, SCANNER_PATH, SCAN_MODE_PATH)
+        .await?
         .as_i64()
         .ok_or("the scan mode is not an integer")?;
     if current != mode {
         println!("Setting scan mode to {name}...");
         let mut patch = Value::object();
         patch.set(SCAN_MODE_PATH, mode)?;
-        client.update(SCANNER_PATH, patch).response()?;
+        client.update(SCANNER_PATH, patch).response().await?;
     }
     Ok(())
 }
 
 /// 开启扫描器的强度输出。
-pub fn enable_intensity(client: &Client) -> Result {
+pub async fn enable_intensity(client: &Client) -> Result {
     println!("Enabling intensity...");
     let intensity = r#"{"parameters":{"scanModeSettings":{"intensityEnabled":true}}}"#;
     client
         .update(SCANNER_PATH, intensity.parse::<Value>()?)
-        .response()?;
+        .response()
+        .await?;
     Ok(())
 }
 
 /// 就绪时启动设备（C++ 示例的 `if (RunningState() == Ready) Start()`）。
-pub fn start_if_ready(system: &System) -> Result {
-    if system.running_state()? == RunState::Ready {
+pub async fn start_if_ready(system: &System) -> Result {
+    if system.running_state().await? == RunState::Ready {
         println!("Starting system...");
-        system.start()?;
+        system.start().await?;
     }
     Ok(())
 }
 
 /// 开启 GDP 输出（Gocator Protocol）。
-pub fn enable_gdp(client: &Client) -> Result {
+pub async fn enable_gdp(client: &Client) -> Result {
     println!("Enabling Gocator Protocol...");
     client
         .update("/controls/gocator", r#"{"enabled":true}"#.parse::<Value>()?)
-        .response()?;
+        .response()
+        .await?;
     Ok(())
 }
 
 /// 把数据源 `source` 加到 GDP 输出的 `output_id` 号，与它重叠的输出项后移（`autoShift`），否则重叠时被拒绝。
-pub fn add_output(client: &Client, source: &str, output_id: i64) -> Result {
+pub async fn add_output(client: &Client, source: &str, output_id: i64) -> Result {
     let mut payload = Value::object();
     payload.set("source", source)?;
     payload.set("outputId", output_id)?;
     payload.set("autoShift", true)?;
     client
         .call("/controls/gocator/outputs/commands/add", payload)
-        .response()?;
+        .response()
+        .await?;
     Ok(())
 }
 
 /// `source` 不在 GDP 输出表中时把它加到 0 号。按 `source` 精确匹配：C++ 把 `source.find(key)` 的返回值当作真值，
 /// 输出表非空即跳过添加。
-pub fn ensure_output(client: &Client, source: &str) -> Result {
-    let outputs = client.read("/controls/gocator/outputs").response()?.payload;
+pub async fn ensure_output(client: &Client, source: &str) -> Result {
+    let outputs = client
+        .read("/controls/gocator/outputs")
+        .response()
+        .await?
+        .payload;
     let added = outputs["map"]
         .as_array()
         .ok_or("/controls/gocator/outputs has no \"map\"")?
         .iter()
         .any(|output| output["source"].as_str() == Some(source));
     if !added {
-        add_output(client, source, 0)?;
+        add_output(client, source, 0).await?;
     }
     Ok(())
 }
 
 /// 连接 GDP 服务端（[`System::gdp`]），打印进度；对应 C++ 示例的
 /// `gdpClient->Connect(system.Address(), system.GdpPort())`。
-pub fn connect_gdp(system: &System) -> Result<gdp::Client> {
+pub async fn connect_gdp(system: &System) -> Result<gdp::Client> {
     println!("Connecting to Gocator Protocol...");
-    Ok(system.gdp()?)
+    Ok(system.gdp().await?)
 }
 
 /// 用 `call <command>` 下载归档（`contents` 选内容），写到当前目录的 `file`，返回其绝对路径；对应 C++ 示例的
 /// archive 一段。响应可能超过 1 GiB，返回前释放。
-pub fn download_archive(client: &Client, contents: &Value, file: &str) -> Result<PathBuf> {
+pub async fn download_archive(client: &Client, contents: &Value, file: &str) -> Result<PathBuf> {
     let archive = Request::with_payload(Method::Call, "/system/commands/archive", contents.clone());
-    let response = client.transfer(archive, RECEIVE_TIMEOUT)?;
+    let response = client.transfer(archive, RECEIVE_TIMEOUT).await?;
     let data = response.payload["data"]
         .as_bytes()
         .ok_or("archive response has no binary \"data\"")?;
@@ -308,11 +322,11 @@ pub fn download_archive(client: &Client, contents: &Value, file: &str) -> Result
 
 /// 把归档文件 `path` 作为 `data` 连同 `contents` 上传并恢复（`call /system/commands/restore`）；对应 C++ 示例的
 /// restore 一段。
-pub fn restore_archive(client: &Client, contents: Value, path: &Path) -> Result {
+pub async fn restore_archive(client: &Client, contents: Value, path: &Path) -> Result {
     let mut restore = Request::with_payload(Method::Call, "/system/commands/restore", contents);
     restore.payload.set("data", std::fs::read(path)?)?;
     println!("Restoring from {}...", path.display());
-    client.transfer(restore, EXTENDED_TIMEOUT)?;
+    client.transfer(restore, EXTENDED_TIMEOUT).await?;
     Ok(())
 }
 
@@ -389,11 +403,11 @@ pub fn print_profile(message: &Message) -> bool {
 }
 
 /// 反复接收，直到数据集里有图像或超过 10 s；返回最后一个数据集（C++ 的 `DataSet()`）。
-pub fn wait_for_image(gdp: &mut gdp::Client) -> Result<Vec<Message>> {
+pub async fn wait_for_image(gdp: &mut gdp::Client) -> Result<Vec<Message>> {
     println!("Waiting until a dataset with Image data is received within 10 seconds.");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let data_set = gdp.receive(RECEIVE_TIMEOUT)?;
+        let data_set = gdp.receive(RECEIVE_TIMEOUT).await?;
         print!(".");
         if data_set
             .iter()

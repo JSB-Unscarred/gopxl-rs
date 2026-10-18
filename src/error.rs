@@ -40,7 +40,7 @@ pub enum DisconnectReason {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// 建立 TCP 连接、设置 socket、复制写句柄或启动连接的线程失败。
+    /// 建立 TCP 连接、设置 socket 或复制 shutdown 用的句柄失败。
     #[error("connect to {addr} failed")]
     Connect {
         /// 对端地址。

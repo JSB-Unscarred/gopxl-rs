@@ -10,7 +10,6 @@
 
 mod common;
 
-use std::thread;
 use std::time::Duration;
 
 use gopxl::Value;
@@ -22,58 +21,64 @@ const TOOL_TYPE: &str = "ProfileBoundingBox";
 /// 改名后的 extId。
 const TOOL_ID: &str = "ProfileBoundingBox-demo";
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
 
     let mut args = Value::object();
     args.set("type", TOOL_TYPE)?;
     println!("\nAdding new tool: {TOOL_TYPE}...");
-    let mut tool = system.resource(TOOLS_PATH).create_child(args)?;
+    let mut tool = system.resource(TOOLS_PATH).create_child(args).await?;
     println!("Tool created at: {}", tool.path());
 
     println!("\nUpdating tool ID to \"{TOOL_ID}\"...");
-    tool.set("/extId", TOOL_ID)?;
+    tool.set("/extId", TOOL_ID).await?;
 
     // 上面的 update 使缓存过期，这里重新读取工具。
-    let use_region = tool.get::<bool>("/parameters/UseRegion")?;
+    let use_region = tool.get::<bool>("/parameters/UseRegion").await?;
     if use_region {
         println!("Tool region already enabled.");
     } else {
         println!("Enabling tool region...");
-        tool.set("/parameters/UseRegion", true)?;
+        tool.set("/parameters/UseRegion", true).await?;
     }
 
     println!("\nModifying tool region...");
     let patch = r#"{"parameters":{"Region":{"height":10.0,"width":10.0,"x":5.0,"z":5.0}}}"#;
-    tool.update(patch.parse::<Value>()?)?;
+    tool.update(patch.parse::<Value>()?).await?;
 
-    let data_sources = system.resource(DATA_SOURCES_PATH).child_paths(rel::ITEM)?;
+    let data_sources = system
+        .resource(DATA_SOURCES_PATH)
+        .child_paths(rel::ITEM)
+        .await?;
     common::print_paths("Data sources", &data_sources);
 
     let mut profile_input = tool.child("inputs/ProfileInput");
     println!("\nConnecting tool input at {}...", profile_input.path());
-    profile_input.set("/dataSource", common::scan_source("topUniformProfile"))?;
+    profile_input
+        .set("/dataSource", common::scan_source("topUniformProfile"))
+        .await?;
 
-    let inputs = tool.child("inputs").child_paths(rel::ITEM)?;
+    let inputs = tool.child("inputs").child_paths(rel::ITEM).await?;
     common::print_paths("Tool inputs", &inputs);
 
     let mut output = tool.child("outputs/X");
     println!("\nEnabling measurement output at {}...", output.path());
-    output.set("/enabled", true)?;
+    output.set("/enabled", true).await?;
 
     // 给工具 1 s 处理扫描数据、算出测量值；与 C++ 相同，读不到时只提示。
-    thread::sleep(Duration::from_secs(1));
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let mut metrics = tool.child("metrics");
-    match metrics.get::<Value>("/outputsByExtId/X/value") {
+    match metrics.get::<Value>("/outputsByExtId/X/value").await {
         Ok(value) => println!("Measurement value: {value}"),
         Err(e) => println!("Note: Could not read measurement value ({e})"),
     }
 
-    common::enable_gdp(system.client())?;
+    common::enable_gdp(system.client()).await?;
 
     // 输出 X 的数据源 ID 是 `tools:<工具 ID>:outputs:X`，工具 ID 即新工具路径的最后一段（协议假设 R2）。
     let tool_id = tool.path().rsplit('/').next().unwrap_or_default();
     println!("Adding measurement value to output...");
-    common::add_output(system.client(), &format!("tools:{tool_id}:outputs:X"), 1)
+    common::add_output(system.client(), &format!("tools:{tool_id}:outputs:X"), 1).await
 }

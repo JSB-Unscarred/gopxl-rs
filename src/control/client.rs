@@ -1,26 +1,27 @@
 //! 主控制连接：[`Connection`] 拥有连接，[`Client`] 发请求，[`Transaction`] 等应答。对应 C++ 的 `GoRestClient`。
 //!
-//! 一条连接一个读线程，请求在调用方线程上写出：
+//! 一条连接一个读任务，请求在调用方的任务上写出：
 //! - 调用方在写锁内先 [`ControlCore::register`] 再写出整帧，槽位顺序因此等于线上顺序；写出失败或超时（10 s）
 //!   可能只写出了半帧，立即拆连接；
-//! - 读线程 `gopxl-control` 无超时地阻塞读帧，在锁外解码，再取分派锁交给 [`ControlCore`]，通知放进订阅队列；
-//! - 锁的顺序固定为写锁 → 分派锁。读线程只取分派锁：服务端停止读取、写出被阻塞时读线程照常读，否则双方都在写、
-//!   都不读；读线程也从不等待消费者（订阅队列满了丢最老的），服务端的 10 s 写超时会断开读得慢的客户端。
+//! - 读任务无超时地读帧、解码，再取分派锁交给 [`ControlCore`]，通知放进订阅队列；
+//! - 锁的顺序固定为写锁（tokio `Mutex`，跨 await 持有）→ 分派锁（std `Mutex`，不跨 await）。读任务只取分派锁：
+//!   服务端停止读取、写出被阻塞时读任务照常读，否则双方都在写、都不读；读任务也从不等待消费者（订阅队列满了丢
+//!   最老的），服务端的 10 s 写超时会断开读得慢的客户端。
 //!
-//! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown、所有挂起的请求以同一个原因失败、关闭订阅队列。
-//! 读错误、EOF、坏帧、写失败与 `Connection` 的 Drop 都走这里，不依赖读线程醒来（见 `Link`）；之后
-//! [`Client::is_connected`] 为假，每个阻塞调用都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的
-//! 请求失败，EOF 时忙等，`IsConnected` 一直为真。
+//! 拆连接（[`Shared::teardown`]）只执行一次：记下原因、shutdown 并中止读任务、所有挂起的请求以同一个原因失败、
+//! 关闭订阅队列。读错误、EOF、坏帧、写失败与 `Connection` 的 Drop 都走这里；之后 [`Client::is_connected`] 为假，
+//! 每个等待都返回 `Disconnected(原因)`，不另设断开回调。C++ 读错误时不让挂起的请求失败，EOF 时忙等，
+//! `IsConnected` 一直为真。
 
 use std::convert::Infallible;
 use std::fmt;
-use std::io::{BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, Weak};
-use std::thread;
 use std::time::Duration;
+
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::time::timeout;
 
 use super::subscription::{self, SubQueue};
 use super::{ControlCore, HEADER_LEN, Inbound, Method, ReplyRx, Request, Response};
@@ -38,42 +39,39 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 /// 主控制连接的唯一 owner，对应 C++ 的 `GoRestClient` / `GoSystem` 的连接部分。
 ///
 /// 不 `Clone`；Drop 即断开（C++ 的 `Disconnect`）：拆连接、所有挂起的请求以 [`DisconnectReason::Closed`] 失败，
-/// 不触发断开回调；不 join 读线程（见 `Link`）。另一线程正阻塞在写出上时，它最多再等 10 s 写超时。请求、订阅与流
-/// 经 [`client`](Self::client) 发出。
+/// 读任务中止，不触发断开回调。请求、订阅与流经 [`client`](Self::client) 发出。
 #[derive(Debug)]
 pub struct Connection {
     client: Client,
 }
 
 impl Connection {
-    /// 连接 `addr`（超时 1 s），启动读线程。
-    pub fn connect(addr: SocketAddr) -> Result<Self> {
-        let socket = net::connect(addr, CONNECT_TIMEOUT)?;
-        // 写句柄是同一个 socket 的另一个句柄：读线程经 `link` 读，写出在写锁内，shutdown 对两者都生效。
-        let writer = socket
-            .try_clone()
-            .map_err(|source| Error::Connect { addr, source })?;
+    /// 连接 `addr`（超时 1 s），在当前 tokio 运行时上启动读任务。
+    pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        let stream = net::connect(addr, CONNECT_TIMEOUT).await?;
+        let link = Link::new(&stream).map_err(|source| Error::Connect { addr, source })?;
+        let (reader, writer) = stream.into_split();
         let shared = Arc::new(Shared {
             addr,
-            link: Link::new(socket),
-            writer: Mutex::new(writer),
+            link,
+            writer: tokio::sync::Mutex::new(writer),
             dispatch: Mutex::default(),
             writes: AtomicU64::new(0),
         });
-        let reader = Arc::clone(&shared);
-        thread::Builder::new()
-            .name("gopxl-control".into())
-            .spawn(move || {
-                let Err(reason) = reader.read_frames();
-                reader.teardown(reason);
-            })
-            .map_err(|source| Error::Connect { addr, source })?;
+        let task = tokio::spawn({
+            let shared = Arc::clone(&shared);
+            async move {
+                let Err(reason) = shared.read_frames(reader).await;
+                shared.teardown(reason);
+            }
+        });
+        shared.link.set_reader(task.abort_handle());
         Ok(Self {
             client: Client { shared },
         })
     }
 
-    /// 发请求、订阅、开流的句柄；clone 可以移到别的线程或存进别的对象，但不让连接存活。
+    /// 发请求、订阅、开流的句柄；clone 可以移到别的任务或存进别的对象，但不让连接存活。
     pub fn client(&self) -> &Client {
         &self.client
     }
@@ -92,34 +90,38 @@ pub struct Client {
     pub(super) shared: Arc<Shared>,
 }
 
-/// 连接的共享状态，由 `Client`（经 `Arc`）与读线程共同持有。
+/// 连接的共享状态，由 `Client`（经 `Arc`）与读任务共同持有。
 pub(super) struct Shared {
     addr: SocketAddr,
     pub(super) link: Link,
-    /// 写锁，锁内是 socket 的写句柄：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在
-    /// 它里面。读线程经 `link` 读同一个 socket，不取这把锁。
-    pub(super) writer: Mutex<TcpStream>,
-    /// 分派锁：读线程处理每一帧时持有。
+    /// 写锁，锁内是 socket 的写半边：整帧写出期间持有，保证帧不交错、槽位顺序等于线上顺序；订阅的登记与注销也在
+    /// 它里面。读任务持有读半边，不取这把锁。
+    pub(super) writer: tokio::sync::Mutex<OwnedWriteHalf>,
+    /// 分派锁：读任务处理每一帧时持有。
     pub(super) dispatch: Mutex<Dispatch>,
     /// 经这条连接发出的变更请求数，见 [`Client::write_count`]。
     writes: AtomicU64,
 }
 
-/// 分派锁保护的状态：读线程按帧更新 FIFO 对应器与订阅队列。
+/// 分派锁保护的状态：读任务按帧更新 FIFO 对应器与订阅队列。
 #[derive(Default)]
 pub(super) struct Dispatch {
     core: ControlCore,
-    /// 本地订阅的队列；`Subscription` 拥有队列，这里只持 `Weak`，Drop 时自行移除。
+    /// 本地订阅的队列；`Subscription` 拥有队列，这里只持 `Weak`，注销时自行移除。
     pub(super) subs: Vec<Weak<SubQueue>>,
 }
 
 impl Shared {
-    /// 读线程：读帧、解码、分派，直到出错或 EOF，返回拆连接的原因。
-    fn read_frames(&self) -> std::result::Result<Infallible, DisconnectReason> {
+    /// 读任务：读帧、解码、分派，直到出错或 EOF，返回拆连接的原因。
+    async fn read_frames(
+        &self,
+        mut reader: OwnedReadHalf,
+    ) -> std::result::Result<Infallible, DisconnectReason> {
         let mut frames = FrameReader::new(HEADER_LEN, MAX_FRAME);
-        let mut socket = BufReader::new(&self.link.socket);
         loop {
-            let frame = frames.read(&mut socket)?.ok_or(DisconnectReason::Eof)?;
+            let frame = net::read_frame(&mut reader, &mut frames, Duration::MAX)
+                .await?
+                .ok_or(DisconnectReason::Eof)?;
             let inbound = Inbound::decode(frame)?;
             let mut dispatch = lock(&self.dispatch);
             if let Some(notification) = dispatch.core.on_inbound(inbound) {
@@ -148,10 +150,10 @@ impl Shared {
         }
     }
 
-    /// 登记并写出一帧；`socket` 是写锁里的写句柄，调用方持锁。
-    pub(super) fn write(
+    /// 登记并写出一帧；`writer` 是写锁里的写半边，调用方持锁。
+    pub(super) async fn write(
         &self,
-        socket: &mut TcpStream,
+        writer: &mut OwnedWriteHalf,
         request: &Request,
         frame: &[u8],
     ) -> Result<ReplyRx> {
@@ -161,7 +163,7 @@ impl Shared {
         let reply = lock(&self.dispatch).core.register();
         // 在写锁内计数，见 `Client::write_count`。
         self.count_write(request.method);
-        if let Err(error) = socket.write_all(frame) {
+        if let Err(error) = net::write_all(writer, frame).await {
             self.teardown(DisconnectReason::Write(error));
             return Err(Error::Disconnected(self.link.disconnected()));
         }
@@ -182,25 +184,34 @@ pub(super) fn encode(request: &Request) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
+/// 等待应答：`status` 不是 OK 时为 `Err(Request)`；超时为 `Err(Timeout)`，槽位成为墓碑；发送端被丢弃只可能是
+/// 连接已经释放。
+pub(super) async fn await_reply(
+    reply: ReplyRx,
+    limit: Duration,
+    method: Method,
+    path: String,
+) -> Result<Response> {
+    match timeout(limit, reply).await {
+        Ok(Ok(Ok(response))) => error::check(method, path, response),
+        Ok(Ok(Err(reason))) => Err(Error::Disconnected(reason)),
+        Ok(Err(_)) => Err(Error::Disconnected(Arc::new(DisconnectReason::Closed))),
+        Err(_) => Err(Error::Timeout {
+            method,
+            path,
+            after: limit,
+        }),
+    }
+}
+
 impl Client {
-    /// 写出任意请求，返回等待应答的 [`Transaction`]。
-    ///
-    /// 写出失败时返回的 `Transaction` 立即以 `Disconnected` 完成，调用方只在 [`Transaction::response`] 处处理错误。
-    /// `stream` 与 `cancelStream` 以 `InvalidArgument` 完成：流在自己的连接上（[`open_stream`](Self::open_stream)），
-    /// 主连接上流的结束与 `cancelStream` 竞争会产生孤立响应，使 FIFO 错位。
+    /// 任意请求的事务，[`Transaction::response`] 时才写出；`listSub`、`clearSub`、`listStream` 也经它发送。
     pub fn send(&self, request: Request) -> Transaction {
-        let reply = if matches!(request.method, Method::Stream | Method::CancelStream) {
-            Err(Error::InvalidArgument(format!(
-                "{} is not allowed on the main connection, use open_stream",
-                request.method.as_str()
-            )))
-        } else {
-            encode(&request).and_then(|frame| {
-                self.shared
-                    .write(&mut lock(&self.shared.writer), &request, &frame)
-            })
-        };
-        Transaction::new(reply, request)
+        Transaction {
+            client: self.clone(),
+            request,
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
 
     /// `read`，对应 C++ 的 `Read`。
@@ -226,6 +237,16 @@ impl Client {
     /// `call`，`payload` 是命令或动作的参数，对应 C++ 的 `Call`。
     pub fn call(&self, path: &str, payload: impl Into<Value>) -> Transaction {
         self.send(Request::with_payload(Method::Call, path, payload))
+    }
+
+    /// 写出 `request` 并丢弃应答（槽位成为墓碑），退订用。
+    pub(super) async fn fire(&self, request: &Request) -> Result<()> {
+        let frame = encode(request)?;
+        let mut writer = self.shared.writer.lock().await;
+        self.shared
+            .write(&mut writer, request, &frame)
+            .await
+            .map(drop)
     }
 
     /// 服务端地址。
@@ -258,55 +279,44 @@ impl fmt::Debug for Client {
     }
 }
 
-/// 一个已写出的请求，等待它的应答，对应 C++ 的 `GoTransaction`。
-///
-/// 丢弃即 fire-and-forget：请求已经写出，迟到的应答由墓碑槽位吸收。
-#[must_use = "the request is already sent; call response() to wait for its reply, or drop it to ignore the reply"]
+/// 一个待发送的请求及其超时，对应 C++ 的 `GoTransaction`：[`response`](Self::response) 写出请求并等待应答，
+/// 丢弃则什么也不发。
+#[must_use = "the request is only sent when response() is awaited"]
 #[derive(Debug)]
 pub struct Transaction {
-    reply: Result<ReplyRx>,
-    method: Method,
-    path: String,
+    client: Client,
+    request: Request,
     timeout: Duration,
 }
 
 impl Transaction {
-    pub(super) fn new(reply: Result<ReplyRx>, request: Request) -> Self {
-        Self {
-            reply,
-            method: request.method,
-            path: request.path,
-            timeout: DEFAULT_TIMEOUT,
-        }
-    }
-
     /// 替换默认的 3 s 超时。
     pub fn timeout(self, timeout: Duration) -> Self {
         Self { timeout, ..self }
     }
 
-    /// 等待应答，对应 C++ 的 `GetResponse` / `CheckResponse`。超时从这里开始计，只覆盖等待应答。
+    /// 写出请求并等待应答，对应 C++ 的 `GetResponse` / `CheckResponse`。超时只覆盖等待应答，从写出之后开始计。
     ///
-    /// `status` 不是 OK 时返回 `Err(Request)`；超时返回 `Err(Timeout)`，槽位成为墓碑，连接照常可用。
-    pub fn response(self) -> Result<Response> {
+    /// `status` 不是 OK 时返回 `Err(Request)`；超时返回 `Err(Timeout)`，槽位成为墓碑，连接照常可用。`stream` 与
+    /// `cancelStream` 报 `InvalidArgument`：流在自己的连接上（[`Client::open_stream`]），主连接上流的结束与
+    /// `cancelStream` 竞争会产生孤立响应，使 FIFO 错位。
+    pub async fn response(self) -> Result<Response> {
         let Self {
-            reply,
-            method,
-            path,
+            client,
+            request,
             timeout,
         } = self;
-        match reply?.recv_timeout(timeout) {
-            Ok(Ok(response)) => error::check(method, path, response),
-            Ok(Err(reason)) => Err(Error::Disconnected(reason)),
-            Err(RecvTimeoutError::Timeout) => Err(Error::Timeout {
-                method,
-                path,
-                after: timeout,
-            }),
-            // 槽位总以响应或 fail_all 完成；发送端被丢弃只可能是连接已经释放。
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(Error::Disconnected(Arc::new(DisconnectReason::Closed)))
-            }
+        if matches!(request.method, Method::Stream | Method::CancelStream) {
+            return Err(Error::InvalidArgument(format!(
+                "{} is not allowed on the main connection, use open_stream",
+                request.method.as_str()
+            )));
         }
+        let frame = encode(&request)?;
+        let reply = {
+            let mut writer = client.shared.writer.lock().await;
+            client.shared.write(&mut writer, &request, &frame).await?
+        };
+        await_reply(reply, timeout, request.method, request.path).await
     }
 }

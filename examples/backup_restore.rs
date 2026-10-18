@@ -12,9 +12,10 @@ use gopxl::Value;
 
 const BACKUP_FILE: &str = "sample_backup.gpbak";
 
-fn main() -> common::Result {
-    let system = common::connect()?;
-    common::verify_connection(&system)?;
+#[tokio::main]
+async fn main() -> common::Result {
+    let system = common::connect().await?;
+    common::verify_connection(&system).await?;
     let client = system.client();
 
     // 加上 "support" 并把扩展名改为 .gpsup 即得到支持文件。
@@ -22,8 +23,8 @@ fn main() -> common::Result {
         .parse::<Value>()?;
 
     println!("Receiving backup data...");
-    let backup_file = common::download_archive(client, &contents, BACKUP_FILE)?;
+    let backup_file = common::download_archive(client, &contents, BACKUP_FILE).await?;
 
     println!("Restoring system...");
-    common::restore_archive(client, contents, &backup_file)
+    common::restore_archive(client, contents, &backup_file).await
 }
